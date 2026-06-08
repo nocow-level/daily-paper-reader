@@ -1,0 +1,1406 @@
+Title: Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead
+
+URL Source: https://openreview.net/pdf?id=3XMA8RDJu2
+
+Number of Pages: 34
+
+Markdown Content:
+## Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Rickard Brüel Gabrielsson 1 Jiacheng Zhu 1 Onkar Bhardwaj 2 Leshem Choshen 1 2 Kristjan Greenewald 2
+
+Mikhail Yurochkin 2 Justin Solomon 1
+
+Abstract 
+
+Fine-tuning large language models (LLMs) with low-rank adaptations (LoRAs) has become com-mon practice, often yielding numerous copies of the same LLM differing only in their LoRA up-dates. This paradigm presents challenges for sys-tems that serve real-time responses to queries that each involve a different LoRA. Prior works op-timize the design of such systems but still re-quire continuous loading and offloading of Lo-RAs, as it is infeasible to store thousands of Lo-RAs in GPU memory. To mitigate this issue, we investigate the efficacy of compression when serving LoRAs. We propose a method for the joint compression of LoRAs into a shared basis paired with LoRA-specific scaling matrices. We extend our algorithm to learn clusters of LoRAs that are amenable to joint compression, allowing it to scale gracefully to large LoRA collections. Our experiments with up to 1000 LoRAs demon-strate that compressed LoRAs preserve perfor-mance while offering major throughput gains in realistic serving scenarios with over a thousand LoRAs, maintaining 80% of the throughput of serving a single LoRA. 
+
+1. Introduction 
+
+The myriad uses for foundation models (FMs) have led to a proliferation of specialized models, each fine-tuned to perform a downstream task. To avoid fine-tuning founda-tion models with billions of parameters, parameter-efficient fine-tuning (PEFT) algorithms were proposed. An es-pecially successful PEFT method is low-rank adaptation (LoRA) (Hu et al., 2021), which learns low-rank addi-tive changes to neural network matrices. Because of the      
+
+> *Equal contribution 1MIT CSAIL 2MIT-IBM Watson AI Lab. Correspondence to: Rickard Brüel Gabrielsson <brg@mit.edu>.
+> Proceedings of the 42 nd International Conference on Machine Learning , Vancouver, Canada. PMLR 267, 2025. Copyright 2025 by the author(s).
+
+Figure 1: Throughput gains when serving 1000s of com-pressed LoRAs with vLLM. low-rank parameterization, these matrices (called adapter weights) contain orders of magnitude fewer parameters than the base model. Still, LoRA can achieve performance on par with full fine-tuning (Hu et al., 2021). LoRA’s popularity has triggered a growing need to serve large collections of LoRA adapters at scale. Proprietary and open-source LLM providers offer fine-tuning services (OpenAI, 2024; TogetherAI, 2024; Predibase, 2024) with user bases likely in the thousands or even hundreds of thousands. As each user wants to use their own fine-tuned version of the LLM, serving a dedicated fine-tuned LLM per user becomes infeasible. To this end, S-LoRA (Sheng et al., 2023) proposes a system where only the base LLM is placed on an inference server and individual LoRA adapters are switched as needed at inference time. S-LoRA optimizes the system’s inner workings via custom CUDA kernels and memory management to increase throughput when serving multiple LoRAs. Multi-LoRA system design has also been adopted in vLLM (Kwon et al., 2023), a state-of-the-art LLM serving engine. Despite optimized system designs, serving LoRAs still has a fundamental limitation: when the number of adapters is large, they need to be con-stantly loaded and offloaded from GPU memory to accom-modate incoming requests, degrading throughput. The problem of accommodating multiple LoRA adapters is also apparent when placing LLMs on edge devices, 1Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+where smaller LLMs are fine-tuned for various tasks, and the adapters are swapped depending on the task at hand (Gunter et al., 2024). In this setting, the number of adapters is smaller, e.g., a few dozen (Gunter et al., 2024), but the memory constraints are also more stringent. In this work, we consider the problem of compressing a collection of LoRAs. We have two key objectives: (1) preserving the performance of the original LoRAs and (2) improving the throughput of serving many LoRAs. We formulate LoRA compression as a reconstruction problem, where the goal is to approximate the original adapters via collections of matrices of a smaller size. We compress Lo-RAs jointly by finding a shared basis and LoRA-specific scaling matrices and propose a joint diagonalization-based algorithm (JD). To improve reconstruction error for large numbers of LoRAs while keeping the number of parame-ters in check, we propose a clustering approach where each cluster is compressed independently using the joint diago-nalization algorithm. Our clustering algorithm is based on alternating between optimizing the cluster assignments and the per-cluster reconstruction error. Figure 1 showcases the benefits of joint compression. When serving up to 64 unique LoRAs, we use JD with-out clustering and for 128 or more, we pick the number of clusters to match the performance of compressed and origi-nal LoRAs. In each case, the GPU memory footprint of the compressed and original LoRAs is matched for a fair com-parison to vLLM’s multi-LoRA inference engine. When serving over 1000 LoRAs, compression increases through-put 1.6× and maintains 80% of the throughput of serving the base LLM (or a single LoRA merged into the LLM). §6 presents detailed results. We summarize our main contributions below: • We formulate the problem of compressing a collection of LoRAs and propose a joint compression scheme based on joint diagonalization. • For large numbers of LoRAs, we scale joint compression by proposing a clustering algorithm where each cluster is jointly compressed to minimize reconstruction error. • We establish theoretical guarantees for the reconstruction error of our compression formulation and relate recon-struction loss to performance empirically. • We train a collection of more than 1000 high-quality LoRAs for Mistral-7B-Instruct-v0.2 (Jiang et al., 2023a) on 1000 natural instruction tasks (Wang et al., 2022) and demonstrate that our compression tech-niques preserve the performance of the original LoRAs. We will release over a 1000 LoRAs to facilitate future work as well as the code for our method. • We incorporate LoRA compression into a state-of-the-art LLM serving system and demonstrate that it is possi-ble to serve over 1000 LoRAs across thousands of asyn-chronous requests with throughput comparable to serving a single LoRA .
+
+2. Related Work 
+
+Parameter-efficient fine-tuning (PEFT) has become preva-lent for updating foundation models thanks to the need for efficiency in training and communication (Lialin et al., 2023). Many PEFT methods have been proposed, e.g. (Houlsby et al., 2019; Liu et al., 2022b) and LoRA (Hu et al., 2021) became the standard, partially due to the ease of switching between LoRAs in inference time. Several works improve LoRA (Liu et al., 2024; Wang et al., 2024), sometimes with algebraic methods like SVD (Meng et al., 2024; Zhang et al., 2023; Jiang et al., 2023b) or by leveraging its statistical properties (Zhu et al., 2024; Zeng & Lee, 2024). Relatively few, however, accelerate infer-ence times. S-LoRA (Sheng et al., 2023) provides an effi-cient means of switching between LoRAs. Wen & Chaud-huri (2024) adapt training to reduce batch multiplications, accelerating inference. Our method achieves a similar out-come (see Appendix D) without changing the LoRA for-mulation or requiring that LoRAs be trained in a dedicated way; future improvements to LoRA will also benefit from this aspect of our work (e.g., Meng et al. (2024)). Punica (Chen et al., 2023) introduces Segmented Gather Matrix-Vector Multiplication (SGMV) to optimize multi-LoRA serving by parallelizing feature-weight multiplica-tions in batches and grouping requests that use the same LoRA. Our approach, by contrast, reduces parameters as a means to serve multiple LoRAs efficiently, providing an orthogonal strategy that can be seamlessly integrated with Punica’s methods to enhance performance. In our vLLM experiments, we leveraged the Punica kernel for multi-LoRA implementation, demonstrating the application of our method in conjunction with Punica’s optimizations. Other research proposes alternative PEFT methods that can be more parameter-efficient than LoRA. For example, VeRA (Kopiczko et al., 2024) fine-tunes LLMs by sharing global static parameters while learning local scaling vari-ables; (IA) 3 (Liu et al., 2022a) also reduces adapter param-eter counts. However, none of these approaches has been as extensively tested or widely-adopted as LoRA. As a result, work that builds on LoRA enjoys a practical advantage due to its broad acceptance in practice. There are many efforts to compress models (Cheng et al., 2017; Gholami et al., 2022; Sharma et al., 2024; Li et al., 2018). Predominantly, pruning and sparsification meth-ods delete weights (Yadav et al., 2023a), and quantiza-tion methods reduce the weights’ precision (Dettmers et al., 2024). Some works compress weights to reduce model size but typically require decompression and hence do not save 2Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+GPU memory (Hershcovitch et al., 2024). Similarly to our work, a few note increased performance and generalization after compression (Yadav et al., 2023a; Nadjahi et al., 2023; Hershcovitch et al., 2024; Sharma et al., 2024). Our work also relates to model merging (Choshen et al., 2022; Wortsman et al., 2022; Matena & Raffel, 2021) and mixtures of experts (Muqeeth et al., 2024; Yadav et al., 2024). These methods reuse models trained by others (Choshen et al., 2023; Raffel, 2023), serving them together as one compressed model. Despite this similarity, these methods create a single general model that acts on any in-put, while ours yields more performant per-task solutions. 
+
+3. Rank-Based LoRA Compression 
+
+LoRA updates are parameterized by pairs of matrices A, B ,whose product BA updates the fixed weight matrices W0 ∈
+
+RdB ×dA of a neural network foundation model. Given an input x to a layer, the output of the LoRA-updated model at this layer is (W0 + BA )x.In formulating our compression algorithms, we consider a collection of given LoRA adapters {(Ai, B i)}ni=1 that we would like to serve. We let ri refer to the rank of the LoRA adapter-pair (Ai, B i), i.e., Bi ∈ RdB ×ri , Ai ∈ Rri×dA .While our compression technique has access only to a col-lection of {(Ai, B i)}ni=1 pairs, in our experiments we will assess the efficacy of compression by comparing how the compressed matrices perform relative to uncompressed Lo-RAs on typical data. For this reason, although in this sec-tion we optimize a Frobenius norm reconstruction error rel-ative to the product BiAi, this is a proxy for the nonlinear and complex way that compression errors in the adapters impact transformer performance. Our experiments will thus focus on the performance of the compressed LoRAs against the uncompressed versions on real data in §6. Our compression methods significantly reduce the overall number of parameters. Reducing parameters theoretically accelerates storage and serving of a collection of LoRAs. This reduction, however, alters the computational dynam-ics during inference, so parameter reduction alone does not immediately imply faster throughput. In light of the com-plexities of GPU optimization, we experimentally assess throughput under realistic conditions in §6.4. 
+
+3.1. Joint Diagonalization 
+
+To scale to many LoRAs, the compressed number of pa-rameters should not scale linearly with n. Hence compress-ing each LoRA individually (e.g., via SVD as in our experi-mental baselines) is inherently limited. To address this, we suggest a Joint Diagonalization (JD) method, which opti-mizes a shared basis onto which we can project the set of 
+
+n LoRAs. This allows structure to be shared, implicitly grouping and/or merging the collection of LoRAs. In this model, each LoRA product BiAi is factorized into the form U ΣiV , where U and V are shared across all Lo-RAs and Σi is specific to each LoRA. In this formulation, every Σi shares the same rank r. This allows U and V to be pre-loaded onto the GPU, with Σi loaded when neces-sary for each batch. The matrices Σi can be either diag-onal or small square matrices, thus significantly reducing the number of LoRA-specific parameters and accelerating multi-LoRA serving. 
+
+Objective function. Motivated by the relationship of sin-gular value decomposition to minimizing the Frobenius norm of the reconstruction error, we also propose to mini-mize the Frobenius norm of the adapter matrix approxima-tion error. Specifically, we use the following objective: 
+
+min 
+
+> {Σi}ni=1 ,U,V n
+
+X
+
+> i=1
+
+∥BiAi − U ΣiV ⊤∥2Fro . (1) Note this problem is not solved by a single matrix SVD, since U and V are shared among all terms but the Σi’s are not. Using the Frobenius norm has the added benefit of making the objective convex in each argument separately, suggesting the possibility of efficient optimization. This objective function is underdetermined, however, so we con-sider two constrained regimes below. 
+
+Full Σi approximation. The first method we call JD-Full. Without loss of generality, U and V can be constrained to be orthogonal, so long as Σi remains an unconstrained full matrix. JD-Full adopts this restriction to make the opti-mization better posed, but note it does not restrict the ex-pressiveness of the objective equation 1. This setting yields the following optimization problem: 
+
+JD-Full r ({BiAi}ni=1 ) = argmin     
+
+> {Σi}ni=1
+> U⊤U=V⊤V=Ir
+> n
+
+X
+
+> i=1
+
+∥BiAi − U ΣiV ⊤∥2Fro 
+
+(JD-Full ) (2) An efficient alternating algorithm to optimize this objective function can be found in Appendix A. 
+
+Diagonal Σi approximation. As an alternative, we can leave U , V unconstrained (other than to have r columns) and instead constrain the matrices Σi to be diagonal (but not necessarily positive). This formulation yields the fol-lowing optimization problem: 3Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+JD-Diag r ({BiAi}ni=1 ) = argmin 
+
+> {Σi}ni=1 ,U,V n
+
+X
+
+> i=1
+
+∥BiAi − U diag(Σ i)V ⊤∥2Fro 
+
+(JD-Diag ) (3) 
+
+Appendix A provides an efficient alternating least squares algorithm for this objective. This diagonal version has per-LoRA parameter savings when compared to JD-Full, since the diagonal Σi only needs r parameters instead of r2.
+
+3.2. Clustering 
+
+As the number of LoRAs n grows and becomes more diverse, the rank r needed for Joint Diagonalization to achieve good performance will tend to increase. This in-creases the size of each Σi that needs to be stored, espe-cially for JD-Full which will require O(nr 2) storage for these matrices. If the necessary r grows proportionally to 
+
+n, then this storage will eventually become the bottleneck. To resolve this limitation with very large n, we propose to group the n LoRAs into k clusters Cj . Each cluster is given its own rank r for JD compression, and the clusters are cho-sen such that the overall reconstruction error is minimized. Specifically, the overall objective is 
+
+min    
+
+> {{ Cj},U j,V j},{Σi}
+
+X
+
+> j
+
+X
+
+> i∈Cj
+
+|| BiAi − Uj ΣiVj || 2 
+
+> F
+
+,
+
+optimized by alternating between cluster assignments and the JD of each cluster; Appendix A.3 provides details. Typ-ically, the goal with large n is to have k grow with n as r
+
+becomes fixed. Comparing k rank-r JD-Full clusters to a rank-kr JD-Full single cluster compression, the clustered approach requires O(dkr + nr 2) parameters, while the single-cluster approach requires O(dkr + nk 2r2) param-eters due to the increased sizes of the Σis. While these two approaches have the same rank, they may have different reconstruction abilities. Empirically, we find that multiple clusters significantly aid performance for n ≥ 100 .
+
+4. Theoretical Analysis 
+
+In this section, we seek to better understand the role of the joint diagonalization method in §3.1 and how it motivates the clustering approach. We focus on the full-Σi case with orthogonal U , V matrices. Note that, for the same r, the 
+
+r-JD-Diag has at least as large reconstruction error as r-JD-Full since it imposes an additional constraint on the Σi.Firstly, note that perfect reconstruction can be achieved if and only if r is large enough, since there exist U, V such that all the Bi, Ai are in the spans of U, V resp. if and only if r ≥ ˜r:
+
+Proposition 1. Suppose rank( BiAi) = ri for all i, and let 
+
+˜r = max rank([ A1, . . . , A n]) , rank([ B⊤ 
+
+> 1
+
+. . . , B ⊤ 
+
+> n
+
+]) .
+
+Note max i ri ≤ ˜r ≤ Pni=1 ri. Then JD-Full (equation 2) with r = ˜ r compresses losslessly (perfect reconstruction), while r < ˜r will give nonzero reconstruction error. 
+
+Due to training noise, ˜r will equal Pni=1 ri almost always. This implies that in most realistic settings, the joint diago-nalization approach is a lossy reconstruction. This reconstruction loss can be significant, as the following theorem shows (proved in Appendix B): 
+
+Theorem 1. Consider n LoRAs {Ai, B i}ni=1 
+
+with r, n ≤ d2, and form the matrix L = vec( B1A1) · · · vec( BnAn)  . Let σj be the singular values of L, sorted from largest to smallest, and let ¯σj be the singular values of Pni=1 BiAi. Then, using JD-Full (equation 2), 
+
+> r
+
+X
+
+> j=1
+
+¯σ2 
+
+> j
+
+≤
+
+> n
+
+X
+
+> i=1
+
+∥Σi∥2Fro =
+
+> n
+
+X
+
+> i=1
+
+∥U ΣiV ⊤∥2Fro ≤
+
+> min( r2,n )
+
+X
+
+> j=1
+
+σ2 
+
+> j
+
+,
+
+implying the sum of squared Frobenius norms of the recon-structed LoRAs satisfies 
+
+Pni=1 ∥U ΣiV ⊤∥2Fro 
+
+Pni=1 ∥BiAi∥2Fro 
+
+≤
+
+Pmin( r2,n ) 
+
+> j=1
+
+σ2
+
+> j
+
+Pnj=1 σ2
+
+> j
+
+≤ 1, and 
+
+Pni=1 ∥U ΣiV ⊤−BiAi∥2Fro 
+
+Pni=1 ∥BiAi∥2Fro 
+
+≥ 1 −
+
+Pmin( r2,n ) 
+
+> j=1
+
+σ2
+
+> j
+
+Pnj=1 σ2
+
+> j
+
+.
+
+In other words, reconstruction error is unavoidable if L’s singular values are not concentrated in the top r2 entries. 
+
+Remark 1 (Lower bound and merging) . The lower bound Prj=1 ¯σ2 
+
+> j
+
+could be achieved by setting all the Σi equal, i.e., using a fully merged model instead of only merging the sub-spaces U , V and allowing Σi to vary with i.
+
+Remark 2 (Upper bound and grouping) . The upper bound is smallest when the LoRAs are relatively clustered , i.e., when groups of vectors vec( BiAi) are similar. This situa-tion raises the magnitude of the largest singular values of 
+
+L, raising the upper bound in the proposition. As the Lo-RAs are d × d matrices that can be thought of as points in Rd2
+
+, for typical values of d well into the hundreds, it is likely that unrelated LoRAs will be unclustered , i.e., they will have relatively low inner products with each other. 
+
+For orthogonal LoRAs, the singular values of L are the norms of the LoRAs, suggesting the following corollary: 1
+
+> 1A result for isotropic Gaussian LoRAs could be obtained via the quantiles of the Marchenko-Pastur Law.
+
+4Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Corollary 1. Suppose (e.g., due to normalization) that the inputs to the joint diagonalization algorithm all have unit Frobenius norm, i.e., ∥BiAi∥Fro = 1. Moreover, assume that the LoRAs are all orthogonal in the sense 
+
+tr(( BiAi)( Bj Aj )⊤) = 0 for i̸ = j. Then, using the JD-Full method equation 2, we have 1 ≤ Pni=1 ∥Σi∥2Fro ≤
+
+min( r2, n ), implying that the sum of squared Frobenius norms of the reconstructed LoRAs satisfies 
+
+1− 1
+
+n ≥
+
+Pni=1 ∥U ΣiV ⊤ − BiAi∥2Fro 
+
+Pni=1 ∥BiAi∥2Fro 
+
+≤ 1−min 
+
+ r2
+
+n , 1
+
+
+
+.
+
+This implies that for the common setting where r2 ≪ n,the reconstructed LoRAs will be significantly smaller than the original LoRAs, with significant reconstruction error. Our analysis illustrates the tradeoffs of joint diagonaliza-tion. If the LoRAs are similar or well-clustered, reconstruc-tion error will be low. On the other hand, if the LoRAs are random and orthogonal, reconstruction error will be high. Since the loss space of transformers is highly complex, in-creasing reconstruction error does not necessarily degrade LLM performance. Interestingly, Figure 3 below shows that while large reconstruction error rapidly decreases per-formance, moderate (but still relatively large, at around 60%) reconstruction error does not damage performance and may even slightly outperform the zero-error setting. At the same reconstruction error, clustering outperforms non-clustering. This motivates our focus on minimizing re-construction error, while also suggesting that our approach achieves something deeper than compression. Specifically, joint diagonalization finds subspaces that are shared among many LoRAs when r is large and merges subspaces when 
+
+r is small. When r is particularly small, this tendency towards averaging all or some of the LoRAs connects to 
+
+merging LoRAs, whose empirical success (Shah et al., 2023; Huang et al., 2024) could explain the procedure’s success despite the nonlinearity of transformers. Appendix H.11 explores this idea further, comparing re-construction of real-world LoRAs to reconstruction of ran-domly sampled LoRAs. The reconstruction error is gen-erally large, but significantly lower than the reconstruction error for random noise, indicating that a major shared com-ponent between the LoRAs is successfully retained. That said, as the number of LoRAs grows, the shared com-ponent may not be significant enough to maintain suffi-ciently low reconstruction error with low rank r. This moti-vates the introduction of clustering in §3.2, since clustering seeks to find groups of LoRAs that are similar and better compressible by joint diagonalization. In particular, if the number of clusters k grows with n, the reconstruction error may no longer degrade with n even when r is fixed. In the extreme case where k = n, each LoRA is com-pressed independently. By the Eckart-Young Theorem, JD applied to a single LoRA reduces to an SVD, replacing each rank-ri LoRA adapter BiAi with a reduced rank-r
+
+approximation, where typically r < 1
+
+> n
+
+Pni=1 ri:
+
+SVD r (BiAi) = UiΣiV ⊤ 
+
+> i
+
+, ∀i = 1 , . . . , n. (4) As ΣiV ⊤ 
+
+> i
+
+can be saved as a single matrix, this approach has 
+
+rn (dA + dB ) parameters. We refer to this k = n method as r-SVD and find that it underperforms our other methods while slightly outperforming the baseline uncompressed LoRAs. This result parallels Jiang et al. (2023b)’s observa-tion that lowering LoRA ranks is beneficial for multi-task learning and model merging. 
+
+5. Training & Performance Evaluation 
+
+5.1. Training 
+
+We trained LoRA adapters on 1000 natu-ral instruction tasks (Wang et al., 2022) using 
+
+Mistral-7B-Instruct-v0.2 (Jiang et al., 2023a) as the base. We set all LoRA adapter ranks to 16 (i.e., 
+
+∀i, r i = 16 ), except for those in our ablation study (Appendix H.1), where we vary the LoRA rank. We selected 10 diverse tasks (Table 2 in Appendix C) man-ually for consistent evaluation across experiments and ran-domly sampled an additional 990 tasks, resulting in a total of 1000 tasks (Table 3). The tasks went through a robust re-viewing protocol to ensure high quality and diversity. Each task data was divided into training, validation, and test sets. Hyperparameters, such as early stopping, were tuned using the validation sets. Table 1, Appendix C shows that on the test sets, LoRA consistently outperformed the base model in terms of Rouge scores and loss metrics. 
+
+5.2. Evaluation 
+
+We evaluated multiple metrics for the natural instruction tasks, including cross-entropy loss, Rouge-1, Rouge-L (Lin, 2004), exact match, and agreement between uncom-pressed and compressed LoRA. Here, agreement measures the exact match in task-generations between the uncom-pressed LoRA model and the compressed LoRA model, rather than comparing to ground truth data. While detailed results and discussions for all metrics are provided in Ap-pendix H, our primary focus in the main text is on Rouge-L. We find that all metrics correlate, but Rouge-L correlates most strongly with downstream utility. This finding aligns with prior work (Wang et al., 2022), which demonstrates that Rouge-L correlates well with classification accuracy. While cross-entropy is used for optimization during train-ing, identical generation outputs across models can yield different cross-entropy losses. Exact match is too rigid and 5Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+does not account for the variability in task responses. Sim-ilarly, agreement does not capture the inexactness associ-ated with most of our tasks, nor does it account for the performance gains or losses of the compressed LoRAs. Ar-guably, practitioners are primarily concerned with task per-formance in the settings for which the LoRA was designed, rather than exact generational agreement between models. Joint diagonalization optimizes reconstruction error mea-sured by the Frobenius norm, bounded by our theoretical analysis in §4. We empirically study the relation between the reconstruction error and downstream Rouge-L perfor-mance in Section 6.2. Instead of listing absolute performance, we compute the performance difference between the base model and the LoRA model for each task via the ratio Performance relative to LoRA := method-performance LoRA-performance for the method in question, highlighting relative improve-ment wrt the uncompressed LoRAs. 
+
+6. Experiments 
+
+6.1. Task Performance 
+
+For each method, we vary the number n of compressed LoRAs and the compression rank r. We run each exper-iment three times with different random seeds and report the mean and standard deviation. See Table 7 for results evaluated on the same ten manually-selected tasks (Table 2) across settings. Every compressed collection of LoRAs contains these 10 tasks (i.e., in-distribution tasks), and each collection contains the smaller collections as subsets. We normalize each LoRA adapter to have a Frobenius norm of one prior to running joint diagonalization. This normal-ization enhances performance and reduces the variance in reconstruction error. We restore the original norms of the LoRA adapters before reconstruction and testing. Figure 2 illustrates the Rouge-L scores of the compressed LoRAs divided by the Rouge-L scores of the uncompressed LoRAs. JD variants often increase generalization and out-perform the original LoRA. Notably, our JD methods ap-proach the compression efficacy of a single LoRA, and with clustering, this aggressive reduction in size also maintains performance in larger collections. Appendix H includes ta-bles of additional relative and absolute metrics. For efficiency, we limited the JD methods to ten iterations instead of full convergence. While the alternating algo-rithm quickly reaches an approximate minimizer, squeez-ing out the last few digits of precision takes many more iter-ations with limited to no performance gain. Appendix H.12 also evaluates an alternative iterative algorithm that con-
+
+Figure 2: Performance after compression. We compare the performance of compressed LoRAs relative to uncom-pressed ones, with higher values on both axes reflecting better performance. The Total Parameter Saved Ratio de-picts the number of parameters saved for a system with a large number n of different LoRAs. It is computed as: 
+
+rtotal := 1 − num. parameters after compression num. parameters before compression .verges more rapidly once U, V are close to a minimizer, with minimal performance differences. 
+
+6.2. Performance and Reconstruction Error 
+
+Figure 3 relates reconstruction error and performance. The 
+
+y-axis measures the mean performance improvement of Rouge-L relative to uncompressed LoRA, and the x-axis quantifies the mean relative reconstruction error between the compressed reconstruction of the product BA and the original product BA . Although performance and recon-struction error relate non-linearly, we see a decreasing, somewhat exponential trend. Notably, minimizing recon-struction error does not yield optimal performance, indi-cating that mild lossy reconstruction may enhance general-ization. Interestingly, under the clustering approach, com-pared to non-clustering, even more aggressive lossy recon-struction can outperform less lossy reconstruction, suggest-ing that reconstruction error is even less critical for perfor-mance in the clustering scenario. To select hyperparameters (compression rank and number of clusters) for the clustering experiments, we first assessed reconstruction error on a single LoRA module over a range of settings (see Appendix G). These preliminary experi-ments enabled efficient selection of cluster counts and rank values for compressing all LoRA modules. 
+
+6.3. Benefits of Compression 
+
+Compressing LoRAs reduces their parameter counts, thus lowering their overall memory footprint. While this offers 6Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Figure 3: Reconstruction error vs. performance. many benefits, in both training and inference scenarios pa-rameters are often transferred between different memory hierarchies (e.g., from CPU to GPU), and these transfers usually scale linearly with the amount of data moved. At the same time, compressed LoRAs alter the forward-pass formulation (unless merged with the base model weights). As shown in Figure 5 in the Appendix E, although com-pression greatly reduces memory usage and transfer time, it does not affect the forward-pass latency. Of the various ways to leverage these improvements, this work focuses on optimizing inference for multiple LoRAs using vLLM. 
+
+6.4. Throughput of Serving Compressed LoRAs 
+
+The previous sections demonstrate how to select an appro-priate joint compression setting guided by the reconstruc-tion error, such that the performance of the original LoRAs is preserved. Naturally, the rank and/or the number of clus-ters for the compression needs to increase as we compress larger LoRA collections to match LoRA performance. Figure 4 studies how throughput with various compression settings compares to the vLLM multi-LoRA throughput with the matched GPU memory footprint. Specifically, for each number of unique LoRAs served and each compres-sion setting, we compute the corresponding number of Lo-RAs to be placed on the GPU during serving and report the ratio of the two throughputs. For example, when serving 64 unique LoRAs and using rank 64 JD-Full compression, we report the ratio of throughputs of rank 64 JD-Full and vLLM multi-LoRA with 6 LoRAs allowed on the GPU at a time (see Appendix F for details). As the number of unique LoRAs increases, vLLM multi-LoRA throughput degrades as it needs to schedule the requests and load and offload the adapters. We note that vLLM multi-LoRA already em-ploys advanced optimizations, such as efficient scheduling and non-blocking CPU-GPU communication when swap-ping LoRAs as well as techniques introduced in S-LoRA (Sheng et al., 2023; Kwon et al., 2023), but system opti-
+
+Figure 4: Throughput ratio when serving varying num-bers of LoRAs with vLLM. Highlighted settings preserve at least 99% of the uncompressed LoRA performance. mization alone is insufficient to mitigate throughput degra-dation when serving many LoRAs. Figure 4 shows that across LoRA collection sizes our compression techniques improve the throughput of vLLM multi-LoRA. Additionally, we highlight regions for each compression setting where compression is sufficiently moderate to achieve 99%+ of LoRA performance, accord-ing to the results in §6.2. Compression with a larger rank or too many clusters does not improve baseline through-put when serving a smaller number of LoRAs and should not be used in such cases. For example, rank 16 JD-Full improves baseline throughput with 4 and 8 LoRAs, but will underperform with more LoRAs, while 25 clus-ters rank 15 JD-Full does not improve throughput with 32 or fewer LoRAs, but when serving 1000+ LoRAs it im-proves the throughput significantly while maintaining the performance. Overall, an appropriate joint compression setting improves vLLM multi-LoRA throughput and pre-serves performance for LoRA collections of any size be-tween 4 and 1024, as in Figure 1. Appendix F provides compression settings for each collection size. vLLM extensively uses custom CUDA kernels. To ac-commodate our compression techniques, we minimally adjusted the vLLM code to generate additional kernels needed by the compressed LoRAs and used the Punica (Chen et al., 2023) kernel to further accelerate matrix mul-tiplication. Pseudocode is given in §F.4 to show how we use the batch multiplication kernel. There likely is room for improvement to optimize the newly added kernels. 
+
+Additional details. In this experiment, we considered a varying number of rank-16 LoRAs, using a dataset of Shakespeare sonnets as inputs 2 arriving asynchronously .
+
+> 2https://www.kaggle.com/ datasets/shivamshinde123/ william-shakespeares-sonnet/data
+
+7Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+We measured throughput, i.e., the number of requests served per second when generating ten tokens per request. The base was Mistral 7B Instruct; we simulated random LoRAs and assigned inputs to LoRAs at random. Experi-ments were conducted on H100 80GB GPU capped at 40% memory consumption to reflect situations where a service provider might want to serve many LoRAs from cheaper hardware with lower memory than higher-end GPUs. This setting applies to the scenario where the LLM is large com-pared to the size of GPU and yet a provider may want to serve many LoRAs efficiently using one device. 
+
+6.5. Recommendations 
+
+JD-Full is generally preferred over JD-Diag, although for smaller numbers of LoRAs (less than 100), the perfor-mance difference is negligible. While JD-Full alone is ef-fective up to 100 LoRAs, incorporating clustering at scales of 500-1000 LoRAs significantly enhances performance. We recommend the following procedure for hyperparam-eter selection. For ≤ 100 LoRAs, JD-Full can be used without substantial degradation, using a rank ≈
+
+(number of LoRAs /2) + 7 . Beyond 100 LoRAs, cluster-ing becomes increasingly critical. A robust method for any number of LoRAs up to 1000 uses JD-Full with cluster-ing. Specifically, select a LoRA module from the middle of the network, apply a compression rank of 16, and exper-iment with an exponentially increasing number of clusters. Compute the reconstruction error for each setting on this module across all LoRAs—a computationally efficient pro-cess. Choose the minimal number of clusters that achieves a reconstruction loss below 0.6, and then use these settings across LoRA modules. Figure 6 in the Appendix illustrates this procedure applied to 500 LoRAs. Tuning hyperparameters as discussed above using recon-struction loss as a validation metric is convenient since it can be done efficiently on CPU without expensive LLM evaluation. As our experiments demonstrate, compression settings that achieve below 0.6 reconstruction loss reliably preserve 99% or more of the LoRA performance, some-times even outperforming the original LoRAs. For inference, this procedure is executed as a preprocess-ing step before deploying our inference server. As new Lo-RAs are submitted, they are initially served uncompressed. A background CPU job can periodically re-run the com-pression algorithm and update the served LoRA parameters with the compressed versions. 
+
+7. Discussion 
+
+This study introduces approaches to LoRA compression, addressing significant challenges emerging as customiza-tion of foundation models such as LLMs and diffusion models becomes increasingly popular. Our contributions include theoretical formulations, empirical validation, and practical implementations that enhance the understanding and application of LLMs in scalable environments. Our findings have several implications. Our theoretical bounds on reconstruction error not only increase confi-dence in the use of compressed models but also lay a groundwork for future explorations. Demonstrating that our compression techniques can preserve up to 100% of the original LoRAs’ performance highlights the effective-ness of our methods. Furthermore, integrating LoRA com-pression into state-of-the-art LLM serving systems demon-strates potential for resource optimization, with throughput for thousands of LoRAs nearing that of a single LoRA. Our promising results suggest several future research direc-tions. First, further compression may be possible via quan-tization, since joint-diagonalization and quantization are independent compression strategies. Second, when scal-ing to hundreds of thousands of LoRAs, joint compression, while effective, will be insufficient to fit all LoRAs onto the GPU, thus requiring a procedure to schedule the requests. Clustering offers opportunities for efficient scheduling that incorporates the cluster assignments of LoRAs correspond-ing to the incoming requests. Privacy presents another research direction, particularly re-garding the possibility of information leakage during joint compression. As a preliminary study, Appendix H.2 inves-tigates whether a base model with an adapter A for task TA,after being jointly compressed alongside an adapter B for task TB , inadvertently improves on TB . Such an outcome would indicate that adapter A acquired information from adapter B. Our ablation study shows no performance gains on TB , suggesting that the compressed adapter A remains independent and does not leak—or gain—information from adapter B. A more detailed investigation of the privacy properties of joint compression is an interesting next step. In conclusion, our research advances LLM deployment by providing robust, scalable, and efficient compression. The ability of compressed LoRAs to maintain high performance while saving resources opens avenues for the broad appli-cation and adoption of LLMs across various industries. We encourage the community to build upon our findings and shared LoRAs to further enhance these technologies. 
+
+Impact Statement 
+
+This paper presents work whose goal is to advance machine learning. There are no societal consequences of our work that we feel must be specifically highlighted here. 8Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Acknowledgements 
+
+The MIT Geometric Data Processing Group acknowledges the generous support of Army Research Office grants W911NF2010168 and W911NF2110293, of National Sci-ence Foundation grant IIS2335492, from the CSAIL Fu-ture of Data program, from the MIT–IBM Watson AI Lab-oratory, from the Wistron Corporation, and from the Toy-ota–CSAIL Joint Research Center. 
+
+References 
+
+Lequn Chen, Zihao Ye, Yongji Wu, Danyang Zhuo, Luis Ceze, and Arvind Krishnamurthy. Punica: Multi-tenant lora serving, 2023. URL https://arxiv.org/ abs/2310.18547 .Yu Cheng, Duo Wang, Pan Zhou, and Tao Zhang. A survey of model compression and acceleration for deep neural networks. arXiv preprint arXiv:1710.09282 , 2017. Leshem Choshen, Elad Venezian, Noam Slonim, and Yoav Katz. Fusing finetuned models for better pretraining. 
+
+ArXiv , abs/2204.03044, 2022. Leshem Choshen, Elad Venezian, Shachar Don-Yehiya, Noam Slonim, and Yoav Katz. Where to start? an-alyzing the potential value of intermediate models. In Houda Bouamor, Juan Pino, and Kalika Bali (eds.), Pro-ceedings of the 2023 Conference on Empirical Meth-ods in Natural Language Processing , pp. 1446–1470, Singapore, December 2023. Association for Computa-tional Linguistics. doi: 10.18653/v1/2023.emnlp-main. 90. URL https://aclanthology.org/2023. emnlp-main.90 .Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. Qlora: Efficient finetuning of quantized llms. Advances in Neural Information Processing Sys-tems , 36, 2024. Amir Gholami, Sehoon Kim, Zhen Dong, Zhewei Yao, Michael W Mahoney, and Kurt Keutzer. A survey of quantization methods for efficient neural network infer-ence. In Low-Power Computer Vision , pp. 291–326. Chapman and Hall/CRC, 2022. Tom Gunter, Zirui Wang, Chong Wang, Ruoming Pang, Andy Narayanan, Aonan Zhang, Bowen Zhang, Chen Chen, Chung-Cheng Chiu, David Qiu, et al. Apple in-telligence foundation language models. arXiv preprint arXiv:2407.21075 , 2024. Moshik Hershcovitch, Leshem Choshen, Andrew Wood, Ilias Enmouri, Peter Chin, Swaminathan Sundarara-man, and Danny Harnik. Lossless and near-lossless compression for foundation models. arXiv preprint arXiv:2404.15198 , 2024. Neil Houlsby, Andrei Giurgiu, Stanislaw Jastrzebski, Bruna Morrone, Quentin De Laroussilhe, Andrea Ges-mundo, Mona Attariyan, and Sylvain Gelly. Parameter-efficient transfer learning for nlp. In International con-ference on machine learning , pp. 2790–2799. PMLR, 2019. Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. Lora: Low-rank adaptation of large language models. arXiv preprint arXiv:2106.09685 , 2021. Chengsong Huang, Qian Liu, Bill Yuchen Lin, Tianyu Pang, Chao Du, and Min Lin. Lorahub: Efficient cross-task generalization via dynamic lora composition, 2024. Albert Q Jiang, Alexandre Sablayrolles, Arthur Mensch, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Florian Bressand, Gianna Lengyel, Guillaume Lample, Lucile Saulnier, et al. Mistral 7b. arXiv preprint arXiv:2310.06825 , 2023a. Weisen Jiang, Baijiong Lin, Han Shi, Yu Zhang, and James T Kwok. Byom: Building your own multi-task model for free. arXiv preprint arXiv:2310.01886 , 2023b. Dawid Jan Kopiczko, Tijmen Blankevoort, and Yuki M Asano. VeRA: Vector-based random matrix adap-tation. In The Twelfth International Conference on Learning Representations , 2024. URL https:// openreview.net/forum?id=NjNfLdxr3A .Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with pagedattention. In 
+
+Proceedings of the 29th Symposium on Operating Sys-tems Principles , pp. 611–626, 2023. Chunyuan Li, Heerad Farkhoor, Rosanne Liu, and Jason Yosinski. Measuring the intrinsic dimension of objective landscapes, 2018. Vladislav Lialin, Vijeta Deshpande, and Anna Rumshisky. Scaling down to scale up: A guide to parameter-efficient fine-tuning. arXiv preprint arXiv:2303.15647 , 2023. Chin-Yew Lin. ROUGE: A package for automatic eval-uation of summaries. In Text Summarization Branches Out , pp. 74–81, Barcelona, Spain, July 2004. Asso-ciation for Computational Linguistics. URL https: //aclanthology.org/W04-1013 .Haokun Liu, Derek Tam, Mohammed Muqeeth, Jay Mo-hta, Tenghao Huang, Mohit Bansal, and Colin Raffel. Few-shot parameter-efficient fine-tuning is better and cheaper than in-context learning, 2022a. URL https: //arxiv.org/abs/2205.05638 .9Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Haokun Liu, Derek Tam, Mohammed Muqeeth, Jay Mo-hta, Tenghao Huang, Mohit Bansal, and Colin A Raffel. Few-shot parameter-efficient fine-tuning is better and cheaper than in-context learning. Advances in Neural Information Processing Systems , 35:1950–1965, 2022b. Shih-Yang Liu, Chien-Yi Wang, Hongxu Yin, Pavlo Molchanov, Yu-Chiang Frank Wang, Kwang-Ting Cheng, and Min-Hung Chen. Dora: Weight-decomposed low-rank adaptation, 2024. Michael Matena and Colin Raffel. Merging mod-els with fisher-weighted averaging. arXiv preprint arXiv:2111.09832 , 2021. Fanxu Meng, Zhaohui Wang, and Muhan Zhang. Pissa: Principal singular values and singular vectors adap-tation of large language models. arXiv preprint arXiv:2404.02948 , 2024. Mohammed Muqeeth, Haokun Liu, Yufan Liu, and Colin Raffel. Learning to route among specialized ex-perts for zero-shot generalization. arXiv preprint arXiv:2402.05859 , 2024. Kimia Nadjahi, Kristjan Greenewald, Rickard Brüel Gabrielsson, and Justin Solomon. Slicing mutual infor-mation generalization bounds for neural networks. In 
+
+ICML 2023 Workshop Neural Compression: From In-formation Theory to Applications , 2023. URL https: //openreview.net/forum?id=cbLcwK3SZi .OpenAI. Openai fine-tuning api. https://platform. openai.com/docs/guides/fine-tuning ,2024. Predibase. Multi-lora inference server that scales to 1000s of fine-tuned llms. https://loraexchange.ai ,2024. Colin Raffel. Building machine learning models like open source software. Communications of the ACM , 66(2): 38–40, 2023. Viraj Shah, Nataniel Ruiz, Forrester Cole, Erika Lu, Svet-lana Lazebnik, Yuanzhen Li, and Varun Jampani. Zi-plora: Any subject in any style by effectively merging loras. arXiv preprint arXiv:2311.13600 , 2023. Pratyusha Sharma, Jordan T. Ash, and Dipendra Misra. The truth is in there: Improving reasoning in language mod-els with layer-selective rank reduction. In The Twelfth International Conference on Learning Representations ,2024. URL https://openreview.net/forum? id=ozX92bu8VA .Ying Sheng, Shiyi Cao, Dacheng Li, Coleman Hooper, Nicholas Lee, Shuo Yang, Christopher Chou, Banghua Zhu, Lianmin Zheng, Kurt Keutzer, Joseph E. Gonzalez, and Ion Stoica. S-lora: Serving thousands of concurrent lora adapters, 2023. TogetherAI. Together fine-tuning. https://www. together.ai/products#fine-tuning , 2024. Sheng Wang, Boyang Xue, Jiacheng Ye, Jiyue Jiang, Liheng Chen, Lingpeng Kong, and Chuan Wu. Prolora: Partial rotation empowers more parameter-efficient lora. ArXiv , abs/2402.16902, 2024. URL https: //api.semanticscholar.org/CorpusID: 268032580 .Yizhong Wang, Swaroop Mishra, Pegah Alipoormolabashi, Yeganeh Kordi, Amirreza Mirzaei, Anjana Arunkumar, Arjun Ashok, Arut Selvan Dhanasekaran, Atharva Naik, David Stap, et al. Super-naturalinstructions: General-ization via declarative instructions on 1600+ nlp tasks. 
+
+arXiv preprint arXiv:2204.07705 , 2022. Yeming Wen and Swarat Chaudhuri. Batched low-rank adaptation of foundation models, 2024. Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chau-mond, Clement Delangue, Anthony Moi, Pierric Cistac, Tim Rault, Rémi Louf, Morgan Funtowicz, Joe Davi-son, Sam Shleifer, Patrick von Platen, Clara Ma, Yacine Jernite, Julien Plu, Canwen Xu, Teven Le Scao, Sylvain Gugger, Mariama Drame, Quentin Lhoest, and Alexan-der M. Rush. Huggingface’s transformers: State-of-the-art natural language processing, 2020. Mitchell Wortsman, Gabriel Ilharco, Samir Yitzhak Gadre, Rebecca Roelofs, Raphael Gontijo-Lopes, Ari S. Mor-cos, Hongseok Namkoong, Ali Farhadi, Yair Carmon, Simon Kornblith, and Ludwig Schmidt. Model soups: averaging weights of multiple fine-tuned models im-proves accuracy without increasing inference time. In 
+
+International Conference on Machine Learning , 2022. Prateek Yadav, Leshem Choshen, Colin Raffel, and Mo-hit Bansal. Compeft: Compression for communicating parameter efficient updates via sparsification and quanti-zation. arXiv preprint arXiv:2311.13171 , 2023a. Prateek Yadav, Derek Tam, Leshem Choshen, Colin Raf-fel, and Mohit Bansal. TIES-merging: Resolving in-terference when merging models. In Thirty-seventh Conference on Neural Information Processing Sys-tems , 2023b. URL https://openreview.net/ forum?id=xtaX3WyCj1 .Prateek Yadav, Colin Raffel, Mohammed Muqeeth, Lu-cas Caccia, Haokun Liu, Tianlong Chen, Mohit Bansal, Leshem Choshen, and Alessandro Sordoni. A survey on 10 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+model moerging: Recycling and routing among special-ized experts for collaborative learning. arXiv preprint arXiv:2408.07057 , 2024. Yuchen Zeng and Kangwook Lee. The expressive power of low-rank adaptation, 2024. Qingru Zhang, Minshuo Chen, Alexander Bukharin, Pengcheng He, Yu Cheng, Weizhu Chen, and Tuo Zhao. Adaptive budget allocation for parameter-efficient fine-tuning. In The Eleventh International Conference on Learning Representations , 2023. Jiacheng Zhu, Kristjan Greenewald, Kimia Nadjahi, Haitz Sáez de Ocáriz Borde, Rickard Brüel Gabriels-son, Leshem Choshen, Marzyeh Ghassemi, Mikhail Yurochkin, and Justin Solomon. Asymmetry in low-rank adapters of foundation models. arXiv preprint arXiv:2402.16842 , 2024. 11 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+A. Joint Diagonalization Algorithms 
+
+A.1. Alternating Methods 
+
+Our goal is to derive algorithms that optimize equation 1. Common to both methods, we expand the objective functional: 
+
+X
+
+> i
+
+∥BiAi − U ΣiV ⊤∥2Fro = X
+
+> i
+
+tr(( BiAi − U ΣiV ⊤)( BiAi − U ΣiV ⊤)⊤) by definition 
+
+= X
+
+> i
+
+tr( BiAiA⊤ 
+
+> i
+
+B⊤ 
+
+> i
+
+) − 2tr( BiAiV Σ⊤ 
+
+> i
+
+U ⊤) + tr( U ΣiV ⊤V Σ⊤ 
+
+> i
+
+U ⊤)
+
+= const. − 2 X
+
+> i
+
+tr( BiAiV Σ⊤ 
+
+> i
+
+U ⊤) + X
+
+> i
+
+∥U ΣiV ⊤∥2Fro . (5) Using this expansion, we now consider the two settings discussed in §3.1. 
+
+Case 1: Non-diagonal Σi, orthogonal U, V . Setting the derivative of equation 5 with respect to Σi to zero, we find 
+
+Σi = Σ ∗ 
+
+> i
+
+(U, V ) = U ⊤BiAiV. (6) We simplify our objective function after plugging in this expression: 
+
+X
+
+> i
+
+∥BiAi − U ΣiV ⊤∥2Fro + const . = X
+
+> i
+
+∥Σi∥2Fro − 2tr( BiAiV Σ⊤ 
+
+> i
+
+U ⊤) from equation 5 
+
+= X
+
+> i
+
+tr( U ⊤BiAiV V ⊤A⊤ 
+
+> i
+
+B⊤ 
+
+> i
+
+U ) − 2tr( BiAiV V ⊤A⊤ 
+
+> i
+
+B⊤ 
+
+> i
+
+U U ⊤) from equation 6 
+
+= − X
+
+> i
+
+tr( BiAiV V ⊤A⊤ 
+
+> i
+
+B⊤ 
+
+> i
+
+U U ⊤).
+
+Substituting equation 6, we find 
+
+Uopt , V opt = arg max    
+
+> U⊤U=IV V ⊤=In
+
+X
+
+> i=1
+
+∥U ⊤BiAiV ∥2Fro = arg max    
+
+> U⊤U=IV V ⊤=In
+
+X
+
+> i=1
+
+∥Σ∗ 
+
+> i
+
+(U, V )∥2Fro . (7) Note that 
+
+> n
+
+X
+
+> i=1
+
+∥U ⊤BiAiV ∥2Fro = tr 
+
+> n
+
+X
+
+> i=1
+
+BiAiV V ⊤A⊤ 
+
+> i
+
+B⊤
+
+> i
+
+!
+
+U U ⊤
+
+!
+
+= tr 
+
+> n
+
+X
+
+> i=1
+
+B⊤ 
+
+> i
+
+A⊤ 
+
+> i
+
+U U ⊤AiBi
+
+!
+
+V V ⊤
+
+!
+
+,
+
+by the identity ∥A∥2Fro = tr( A⊤A). Hence, we optimize equation 7 by alternating between U and V :• U iteration: Define M := P 
+
+> i
+
+BiAiV V ⊤A⊤ 
+
+> i
+
+B⊤ 
+
+> i
+
+. Parenthesizing this expression properly requires only O(( m + n)r)
+
+storage/computation time. With this definition, we maximize tr( M U U ⊤) over U satisfying U ⊤U = I. Since M is positive semidefinite, the optimum is to take U to be the r eigenvectors of M with largest eigenvalue, equivalent to an SVD problem. • V iteration: Define N := P 
+
+> i
+
+A⊤ 
+
+> i
+
+B⊤ 
+
+> i
+
+U U ⊤BiAi. Similarly to the previous step, we take V to contain the r eigenvectors of N with largest eigenvalue, again solvable using an SVD. This method decreases the objective in each step. 
+
+Case 2: Diagonal Σi. If constrain Σi to be diagonal, we interpret our objective function equation 1 as a “triple least 12 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+squares” problem. We compute gradients: 
+
+∇U
+
+X
+
+> i
+
+∥BiAi − U ΣiV ⊤∥2Fro = 2 X
+
+> i
+
+(U ΣiV ⊤ − BiAi)V Σ⊤
+
+> i
+
+∇V
+
+X
+
+> i
+
+∥BiAi − U ΣiV ⊤∥2Fro = 2 X
+
+> i
+
+(V Σ⊤ 
+
+> i
+
+U ⊤ − A⊤ 
+
+> i
+
+B⊤ 
+
+> i
+
+)U Σi
+
+∇Σi
+
+X
+
+> i
+
+∥BiAi − U ΣiV ⊤∥2Fro = 2 U ⊤(U ΣiV ⊤ − BiAi)V
+
+These expressions suggest efficient r × r linear systems to solve for U, V :
+
+U = X
+
+> i
+
+BiAiV Σ⊤
+
+> i
+
+! X
+
+> i
+
+ΣiV ⊤V Σ⊤
+
+> i
+
+!−1
+
+V = X
+
+> i
+
+A⊤ 
+
+> i
+
+B⊤ 
+
+> i
+
+U Σi
+
+! X
+
+> i
+
+Σ⊤ 
+
+> i
+
+U ⊤U Σi
+
+!−1
+
+.
+
+For Σi, we extract the diagonal from our gradient above: 
+
+diag( U ⊤U ΣiV ⊤V )j = ( U ⊤U ΣiV ⊤V )jj 
+
+= X
+
+> m
+
+(U ⊤U )jm Σimm (V ⊤V )mj 
+
+= ( U ⊤U ◦ V ⊤V )diag(Σ i)diag( U ⊤BiAiV )j = X
+
+> m
+
+(U ⊤Bi)jm (AiV )mj 
+
+= X
+
+> m
+
+(U ⊤Bi)jm (V ⊤A⊤ 
+
+> i
+
+)jm 
+
+= ( U ⊤Bi ◦ V ⊤A⊤ 
+
+> i
+
+)1
+
+=⇒ diag(Σ i) = ( U ⊤U ◦ V ⊤V )−1(U ⊤Bi ◦ V ⊤A⊤ 
+
+> i
+
+)1
+
+Here ◦ denotes the Hadamard product. Combining these expressions, we use a simple coordinate descent algorithm cycling between the following three steps: 1. Solve for U
+
+2. Solve for V
+
+3. Solve for the Σi’s 4. Optionally, normalize so P 
+
+> i
+
+∥Σi∥2Fro = 1 
+
+A.2. Additional Eigenvalue Iteration Algorithm 
+
+For the first case in §A.1, we introduce an alternative algorithm that eschews the use of SVD. This alternative is optimized for GPU execution, enabling tractable runs to convergence. To derive this algorithm, we employ Lagrange multipliers to formulate the derived objective from equation 7: 
+
+Uopt , V opt = arg max    
+
+> U⊤U=IV V ⊤=In
+
+X
+
+> i=1
+
+∥U ⊤BiAiV ∥2Fro , (8) yielding the expression 
+
+Λ = − 12 ∥U ⊤BiAiV ∥2Fro − 12 tr (X⊤(I − U ⊤U )) − 12 tr (Y ⊤(I − V ⊤V )) . (9) 13 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Taking the derivatives gives 
+
+∇U Λ = − X
+
+> i
+
+Bi(AiV )( V ⊤A⊤ 
+
+> i
+
+)( B⊤ 
+
+> i
+
+U ) + U X (10) 
+
+∇V Λ = − X
+
+> i
+
+A⊤ 
+
+> i
+
+(B⊤ 
+
+> i
+
+U )( U ⊤Bi)( AiV ) + V Y (11) Setting these derivatives to zero shows 
+
+X
+
+> i
+
+Bi(AiV )( V ⊤A⊤ 
+
+> i
+
+)( B⊤ 
+
+> i
+
+U ) = U X (12) 
+
+X
+
+> i
+
+A⊤ 
+
+> i
+
+(B⊤ 
+
+> i
+
+U )( U ⊤Bi)( AiV ) = V Y. (13) Here, one can show that the Lagrange multiplier matrices X and Y are diagonal and nonnegative, since the problem reduces to an eigenvalue problem when either U or V is fixed; this is essentially the argument behind the alternating algorithm in Appendix A. Hence, taking inspiration from classical eigenvalue iteration, we use the following updates to improve our estimates of U and V :
+
+U (k+1) 0 ← X
+
+> i
+
+Bi(AiV (k))(( V (k))⊤A⊤ 
+
+> i
+
+)( B⊤ 
+
+> i
+
+U (k)) (14) 
+
+V (k+1) 0 ← X
+
+> i
+
+A⊤ 
+
+> i
+
+(B⊤ 
+
+> i
+
+U (k))(( U (k))⊤Bi)( AiV (k)) (15) 
+
+U (k+1) ← orthogonalize (U (k+1) 0 ) (16) 
+
+V (k+1) ← orthogonalize (V (k+1) 0 ) (17) Here, the function orthogonalize orthogonalizes the columns of a matrix, e.g. by using the Q part of the reduced-size 
+
+QR factorization. Although we lack a formal convergence proof, in practice we find that this method reliably reaches a local optimum of our problem. By executing matrix operations in the specified sequence, these computations can be rapidly performed on GPUs. Note the expressions above are parenthesized to avoid constructing a large matrix product as an intermediate computation. 
+
+A.3. Clustering algorithm Initialization : We run joint diagonalization with a single U, V then perform k-means with k clusters on the space of Σi’s. This gives us our first clusters and we can use random initialization Uj , V j for each cluster but the Σi can be maintained as initialization. 
+
+Step 1: Using the alternating JD algorithms from earlier in this section, we optimize the problem 
+
+min Uj ,V j ,Σi
+
+P 
+
+> i∈Cj
+
+|| BiAi − Uj ΣiV ⊤ 
+
+> j
+
+|| 2 
+
+> F
+
+for each j independently. 
+
+Step 2 : New cluster assignment for i : min j min Σi || BiAi − Uj ΣiV ⊤ 
+
+> j
+
+|| 2 
+
+> F
+
+. If any assignment changes we go to Step 1, else we have converged. 
+
+B. Proof of Theorem 1 
+
+Proof. For the lower bound, note that by Jensen’s inequality, 
+
+> n
+
+X
+
+> i=1
+
+∥U ⊤BiAiV ∥2Fro ≥ U ⊤
+
+> n
+
+X
+
+> i=1
+
+BiAiV
+
+> 2Fro
+
+,
+
+for any U, V . Hence, 
+
+sup  
+
+> U,V ∈St( k,d )
+> n
+
+X
+
+> i=1
+
+∥U ⊤BiAiV ∥2Fro ≥ sup  
+
+> U,V ∈St( k,d )
+
+U ⊤
+
+> n
+
+X
+
+> i=1
+
+BiAiV
+
+> 2Fro
+
+. (18) 14 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+By the definition of singular value decomposition, the right hand side of equation 18 is maximized with U , V being the top 
+
+r singular vectors of Pni=1 BiAi, yielding U ⊤ Pni=1 BiAiV 2Fro = Pri=1 ¯σ2 
+
+> i
+
+. Recalling that Σi = U ⊤BiAiV yields the lower bound. For the upper bound, recall that Σi = U ⊤BiAiV . Rearranging, 
+
+vec(Σ i) = ( V ⊤ ⊗ U ⊤)vec( BiAi).
+
+Define 
+
+¯Σ := [vec(Σ 1), . . . , vec(Σ n)] .
+
+By our previous simplification, 
+
+¯Σ = ( V ⊤ ⊗ U ⊤)L. 
+
+Now nX
+
+> i=1
+
+∥Σi∥2Fro = ∥ ¯Σ∥2Fro = tr  (( V ⊗ U )( V ⊗ U )⊤)( LL ⊤)
+
+Since U, V are orthogonal and size d × r, the top r2 eigenvalues of the symmetric matrix (V ⊗ U )( V ⊗ U )⊤ will be equal to 1, and the rest will equal 0. The eigenvalues of the symmetric matrix LL ⊤ will be equal to the squared singular values of L. We can then apply the Von Neumann trace inequality to obtain the upper bound. The last statement follows from the Pythagorean theorem and the fact that the Σi is a projection of BiAi to the U, V 
+
+subspace. Note that we have only used the fact that the matrix (V ⊗ U ) has singular values equal to 1; we have not used the fact that it has Kronecker product structure. On the other hand, each vector vec( BiAi) is a sum of ri Kronecker products and cannot be expressed as a Kronecker product. As a result, while the upper bound in the Von Neumann trace inequality is achieved if the eigenvectors of the two matrices align, the Kronecker product structure is a severe constraint and the upper bound we have provided is generous. 
+
+C. Training LoRAs 
+
+We trained LoRA adapters on 500 natural instruction tasks (Wang et al., 2022) using Mistral-7B-Instruct-v0.2 
+
+(Jiang et al., 2023a) as the base model. All LoRA adapters were configured with a rank of 16, i.e., ∀i, r i = 16 . We selected 10 diverse tasks manually for consistent evaluation across experiments and randomly sampled an additional 490 tasks, resulting in a total of 500 tasks. These tasks were exclusively in English (both input and output), ensuring higher quality and thorough review (Wang et al., 2022). Each task dataset was divided into training, validation, and test sets (80-10-10). Hyperparameters, such as early stopping, were tuned using the validation sets; that is, we train for five epochs and take the best-performing epoch-checkpoint per validation loss. Evaluation on the test sets demonstrated that LoRA consistently outperformed the base model in terms of both Rouge scores and loss metrics (see Table 1). In Table 1, we compare metrics between base model and LoRA finetuning. Table 1: Comparison of metrics before and after LoRA training across 1000 tasks. 
+
+Metric Base Model LoRA 
+
+Loss 4.14 ± 3.07 0.56 ± 0.58 
+
+Exact Match 1.81 ± 6.56 51 .38 ± 40 .90 
+
+Rouge-1 21 .70 ± 19 .22 68 .88 ± 29 .73 
+
+Rouge-L 20 .62 ± 18 .21 67 .80 ± 30 .15 
+
+In Table 3 we include all 1000 tasks that were used. We use Huggingface (Wolf et al., 2020) in our implementation. For the base model, we use quantization with configuration: 15 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Table 2: Main Evaluation Tasks 
+
+Task Number Name Type Domain 
+
+task280 stereoset_classification_stereotype_type classification stereoset task190 snli_classification snli image captions task391 causal_relationship commonsense cause and effect task290 tellmewhy_question_answerability answerability story task1391 winogrande_easy_answer_generation commonsense social and physical task1342 amazon_us_reviews_title title generation amazon reviews task442 com_qa_paraphrase_question_generation question generation wikipedia task620 ohsumed_medical_subject_headings_answer_generation keyword tagging scientific task1598 nyc_long_text_generation data to text restaurants task039 qasc_find_overlapping_words overlap extraction natural science 
+
+BitsAndBytesConfig( load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16, )
+
+and LoRA configuration: 
+
+LoraConfig( r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj"], lora_dropout=0.05, bias="none", task_type="CAUSAL_LM", init_lora_weights=init_lora_weights, )
+
+D. Avoiding Batched Matrix Multiplication (BMM) 
+
+Fast LoRA (Wen & Chaudhuri, 2024) aims to alleviate the batched matrix multiplication (BMM) bottleneck when serving many LoRAs. They propose an adapter parameterization that replaces addition with elementwise multiplication, avoiding BMM and improving LoRA throughput at lower ranks. Our JD LoRA formulation also circumvents or heavily reduces the impact of BMM as discussed below, and both individual and joint compression methods can be applied to Fast LoRAs. In the envisioned deployment scenario, a service provider hosts a large collection of LoRAs. Upon receiving a request, each user specifies both the input data and the desired LoRA identifier. The provider then processes the base model augmented with the specified LoRA for each user’s data. As a provider is batching a collection of requests for GPU parallelization, they can expect to frequently have more than one unique LoRA identifier per batch. Traditionally, a specific LoRA is integrated into the base model by transforming W0 → W0 + BiAi. Serving multiple LoRAs conventionally would necessitate maintaining and executing a separate copy of the base model for each LoRA, bringing substantial computational overhead. Alternatively, the computation for W0x and BiAix can be performed inde-pendently and subsequently merged. This strategy necessitates only a single instance of W0x computation and storage of LoRA-specific parameters rather than the entire base model. Consider the batch processing of BAx , where boldface indicates that Bi, A i are stacked into tensors of dimensions (b ×
+
+16 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Figure 5: Memory load, transfer time, and forward-pass performance of LoRA and JD-LoRA. 
+
+m × r) and (b × r × n) respectively, with batched data x shaped (b × l × n):
+
+Ax ↔ (b × r × n) × (b × l × n) → (b × l × r) bmm 
+
+B(Ax ) ↔ (b × m × r) × (b × l × r) → (b × l × m) bmm .
+
+Here, “bmm” denotes batched matrix multiplication, a known bottleneck in both throughput and latency. Consider the corresponding operations for our joint compression scheme, U ΣV ⊤x:
+
+V ⊤x ↔ (˜ r × n) × (b × l × n) → (b × l × ˜r) broadcasted 
+
+Σ(V ⊤x) ↔ (b × ˜r) × (b × l × ˜r) → (b × l × ˜r) broadcasted 
+
+U (ΣV ⊤x) ↔ (m × ˜r) × (b × l × ˜r) → (b × l × m) broadcasted In our optimized setup, batched matrix multiplications can be completely circumvented if the Σi matrices are diagonal. If not, given that ˜r ≪ m, n , any required batched matrix multiplication remains computationally inexpensive. 
+
+E. Simple Timing Experiments 
+
+In Figure 5, we present a set of simple experiments comparing the memory load, transfer time, and forward-pass perfor-mance of LoRA and JD-LoRA. These experiments were conducted across multiple clusters and various rank configurations. For memory usage, we measured all 96 LoRA modules in the Mistral model; however, for transfer time and forward-pass performance, we tested only a single LoRA module. We also implemented F-LoRA (Wen & Chaudhuri, 2024), but contrary to their reported results, we were unable to achieve faster forward-pass performance than standard LoRA. 
+
+F. GPU Memory Usage Computation for JD Compression. 
+
+The GPU memory consumption is primarily influenced by the number of parameters that need to be stored and processed during inference. In this section, we introduce the detail of how we compute the GPU consumption of our method, and how we find the number of vLLM multi-LoRA that share the same GPU utilization. • D: Hidden dimension size (e.g., D = 4098 ). • r: Rank of the shared basis matrices for compression (e.g., r = 16 , 32 , 64 ). • N : Maximum number of LoRA modules being served simultaneously (max_lora_num). • c: Number of clusters in our clustering method (e.g., c = 7 , 10 , 25 ). In Figure 1, we use different JD-compression settings for serving different number of unique LoRAs. Specifically: • Serving 4 unique LoRAs: 
+
+Ours: rank 16 JD-Full. vLLM multiLoRA baseline: max-gpu-lora = 2. 17 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+• Serving 8 unique LoRAs: 
+
+Ours: rank 16 JD-Full. vLLM multiLoRA baseline: max-gpu-lora = 2. • Serving 16 unique LoRAs: 
+
+Ours: rank 32 JD-Full. vLLM multiLoRA baseline: max-gpu-lora = 3. • Serving 32 unique LoRAs: 
+
+Ours: rank 64 JD-Full. vLLM multiLoRA baseline: max-gpu-lora = 5. • Serving 64 unique LoRAs: 
+
+Ours: rank 64 JD-Full. vLLM multiLoRA baseline: max-gpu-lora = 6. • Serving 128 unique LoRAs: 
+
+Ours: 7 clusters, rank 16 JD-Full. vLLM multiLoRA baseline: max-gpu-lora = 8. • Serving 256 unique LoRAs: 
+
+Ours: 10 clusters, rank 16 JD-Full. vLLM multiLoRA baseline: max-gpu-lora = 10. • Serving 512 unique LoRAs: 
+
+Ours: 25 clusters, rank 16 JD-Full. vLLM multiLoRA baseline: max-gpu-lora = 26. • Serving 1024 unique LoRAs: 
+
+Ours: 25 clusters, rank 16 JD-Full. vLLM multiLoRA baseline: max-gpu-lora = 28 
+
+F.1. Baseline GPU Memory Usage 
+
+The baseline for our comparison is the standard LoRA method with a rank of 16. The total parameter count for the baseline is given by: Params baseline = D × 2 × 16 .
+
+This accounts for the parameters in the LoRA-adapted layers, where the factor of 2 represents the weights and biases. 
+
+F.2. GPU Memory Usage for JD Full Method 
+
+For the Joint Decomposition (JD) Full method without clustering, the total parameter count is: Params JD_Full = D × 2 × r + N × r2.
+
+• D × 2 × r: Parameters for the base model adapted with rank-r LoRA. • N × r2: Additional parameters introduced by each of the N LoRA modules, each of size r × r.The GPU memory usage ratio relative to the baseline is: GPU Usage Ratio JD_Full = Params JD_Full 
+
+Params baseline 
+
+= D × 2 × r + N × r2
+
+D × 2 × 16 .
+
+F.3. GPU Memory Usage for Clustering Method 
+
+When employing clustering, the parameter count changes due to the addition of cluster-specific parameters: Params Clustering = D × 2 × r × c + N × (r2 + 1) .
+
+• D × 2 × r × c: Parameters for the base model adapted with rank-r LoRA across c clusters. 18 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+• N × (r2 + 1) : Additional parameters for each LoRA module and cluster assignments. The GPU memory usage ratio is: GPU Usage Ratio Clustering = Params Clustering 
+
+Params baseline 
+
+= D × 2 × r × c + N × (r2 + 1) 
+
+D × 2 × 16 .
+
+F.4. Punica 
+
+In our vLLM experiments, we specifically used the Punica kernel for implementing multi-LoRA, applying our approach in conjunction with Punica’s capabilities. Our custom function, add_lora_slice_with_sigma , implements the following key steps: 1. Initialize Buffers : Creates temporary storage for intermediate calculations if not already provided. 2. Apply Matrix A : Transforms x using matrix A, storing the result in buffer .3. Apply Matrix Sigma : Further transforms buffer using Sigma , storing the result in buffer_sigma .4. Apply Matrix B and Update y: Finally, transforms buffer_sigma using B, applies scaling, and updates a slice of 
+
+y in place. Below is the pseudocode for add_lora_slice_with_sigma , illustrating the integration: Listing 1: Pseudocode for ‘add_lora_slice_with_sigma‘                                                                         
+
+> 1Function add_lora_slice_with_sigma(y, x, wa_t_all, wb_t_all, wsigma_t_all, indices, layer_idx, scale, y_offset, y_slice_size, buffer =None):
+> 2#Initialize buffers if not provided
+> 3if buffer is None:
+> 4buffer =create_tensor(shape=(x.size(0), R), dtype=float32)
+> 5buffer_sigma =create_tensor(shape=( buffer .size(0), R), dtype=float32)
+> 6#Step 1: Apply matrix A
+> 7dispatch_bgmv_low_level( buffer ,x, wa_t_all, indices, layer_idx, scale=1.0)
+> 8#Step 2: Apply matrix Sigma
+> 9dispatch_bgmv_low_level(buffer_sigma, buffer ,wsigma_t_all, indices, layer_idx, scale =1.0)
+> 10 #Step 3: Apply matrix Band update yslice
+> 11 dispatch_bgmv_low_level(y, buffer_sigma, wb_t_all, indices, layer_idx, scale, y_offset ,y_slice_size)
+> 12 End Function
+
+G. Selecting Number of Clusters 
+
+To identify optimal hyperparameters for the clusters compression method, we analyzed the relationship between recon-struction error and the parameter saved ratio for a single LoRA module, as shown in Figure 6. By comparing the results across different numbers of Low-Rank Adaptation (LoRA) configurations (100 and 500, depicted in subfigures 6a and 6b), we were able to observe the trade-off between model size reduction and reconstruction accuracy. Based on these findings, we selected the rank and number-of-clusters hyperparameters that effectively balance these two objectives. The chosen settings were then used to conduct full-scale experiments. 
+
+H. Additional Results 
+
+This section elaborates on the results that underpin the figures presented in the main text and showcases a consistent correlation across various evaluation metrics. Additionally, we assess the significance of achieving convergence and the performance of compression on new unseen LoRA models. 
+
+H.1. LoRAs of different ranks 
+
+In Table 4, we report the performance of our compression method on LoRAs with ranks uniformly sampled between 16 and 64 (mean rank of 43). In Table 5, we present compression results for LoRAs of rank 43, matching the average rank from Table 4. Because these same-rank LoRAs have an identical parameter count, they also exhibit identical parameter-saving 19 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead  
+
+> (a) Recon. Error vs Parameter Saved Ratio for 100 LoRAs (b) Recon. Error vs Parameter Saved Ratio for 500 LoRAs
+
+Figure 6: Comparison of reconstruction error against the parameter saved ratio for different numbers of LoRA configura-tions for a single LoRA module. The left subplot shows results for 100 LoRAs, while the right subplot displays results for 500 LoRAs. These plots illustrate the trade-off between reconstruction accuracy and compression efficiency, providing insights into optimal parameter settings for compression. ratios. While performance declines slightly for LoRAs with varying ranks, our compression method still preserves over 99% of the original performance. 
+
+H.2. Privacy Ablation 
+
+We investigate whether jointly compressing certain tasks results in improved performance on tasks within that same com-pressed group, compared to tasks outside of the group. In other words, we examine whether information about which tasks were compressed together could be inferred from subsequent performance differences. Table 6 presents the results. In the Compressed Together setting, tasks (task1391, task190, task280, task290, and task391) are compressed jointly with five other tasks. We then evaluate their cross-task performance within this group. In the Compressed Separately setting, the same set of tasks is each compressed alongside nine other tasks that are not part of the original group. We again evaluate the cross-task performance using the same sets of tasks, allowing us to compare and assess any differences in performance attributable to joint versus separate compression. Table 6: Privacy Ablation: Performance on tasks compressed together vs. performance on tasks compressed separately                                                                                          
+
+> Source Task Task Combination Test Loss Exact Match Rouge1 RougeL
+> Compressed Together
+> task1391 task1391 on task190 2.320 29 29.00 29.00 task1391 on task280 1.445 10 12.00 12.00 task1391 on task290 2.662 00.00 0.00 task1391 on task391 1.560 47.00 7.00
+> Average 1.997 10.8 12.00 12.00 task190 task190 on task1391 1.392 00.00 0.00 task190 on task280 1.647 22.00 2.00 task190 on task290 1.838 00.00 0.00 task190 on task391 2.622 22.00 2.00
+> Average 1.875 1.0 1.00 1.00 task280 task280 on task1391 2.259 14 16.47 16.47 task280 on task190 2.922 20 20.50 20.50 task280 on task290 0.729 33 43.07 43.07 task280 on task391 2.318 44 62.52 62.52
+> Average 2.057 27.8 35.64 35.64 task290 task290 on task1391 0.867 36 46.58 46.58 task290 on task190 1.553 36 36.00 36.00 task290 on task280 1.036 43 43.40 43.40 task290 on task391 0.461 59 86.33 86.33
+> Average 0.979 43.5 53.08 53.08 task391 task391 on task1391 0.502 65 65.75 65.75
+
+20 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Table 6: Privacy Ablation: Performance on tasks compressed together vs. performance on tasks compressed separately (continued) 
+
+Source Task Task Combination Test Loss Exact Match Rouge1 RougeL task391 on task190 1.421 31 31.00 31.00 task391 on task280 0.417 69 69.00 69.00 task391 on task290 0.265 71 90.33 90.33 
+
+Average 0.651 59.0 64.02 64.02 
+
+Compressed Separately 
+
+task1391 task1391 on task190 2.347 30 30.00 30.00 task1391 on task280 1.543 11 13.58 13.58 task1391 on task290 2.477 0 0.00 0.00 task1391 on task391 1.253 10 18.00 18.00 
+
+Average 1.905 12.8 15.40 15.40 task190 task190 on task1391 1.388 0 0.00 0.00 task190 on task280 1.603 2 2.00 2.00 task190 on task290 1.771 0 0.00 0.00 task190 on task391 2.326 4 4.00 4.00 
+
+Average 1.772 1.5 1.50 1.50 task280 task280 on task1391 3.111 2 5.13 5.13 task280 on task190 2.711 19 19.00 19.00 task280 on task290 0.948 16 22.09 22.09 task280 on task391 2.449 39 53.11 53.11 
+
+Average 2.305 19.0 24.83 24.83 task290 task290 on task1391 0.848 41 47.58 47.58 task290 on task190 1.355 38 38.00 38.00 task290 on task280 1.050 41 41.00 41.00 task290 on task391 0.463 59 86.33 86.33 
+
+Average 0.929 44.8 53.23 53.23 task391 task391 on task1391 0.428 68 68.74 68.74 task391 on task190 1.507 31 31.00 31.00 task391 on task280 0.368 70 70.00 70.00 task391 on task290 0.269 73 91.00 91.00 
+
+Average 0.643 60.5 65.18 65.18 
+
+H.3. Relative Rouge-L Performance and Compression Rate 
+
+Table 7 presents comprehensive results from the experiments underlying Figure 2 for each evaluation task. Additionally, we incorporate results using the Ties-merging benchmark (Yadav et al., 2023b), which consolidates all LoRA-adapters into a single adapter of identical configuration and parameter count; this integration significantly compromises performance. 
+
+H.4. Absolute Rouge-L Performance and Compression Rate 
+
+Table 8 provides the full results behind Table 7, but with Rouge-L scores instead of relative performance compared to LoRA. 
+
+H.5. Relative Rouge-1 Performance and Compression Rate 
+
+Table 9 provides full results for relative performance of Rouge-1, which shows the same trends as the results for relative performance of Rouge-L (Table 7). 
+
+H.6. Absolute Rouge-1 Performance and Compression Rate 
+
+Table 10 provides full results for absolute performance of Rouge-1, which shows the same trends as the results for absolute performance of Rouge-L (Table 8). 
+
+H.7. Relative Exact-Match Performance and Compression Rate 
+
+Table 11 provides full results for relative performance of exact-match, which shows the same trends as the results for relative performance of Rouge-L (Table 7). 
+
+21 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+H.8. Loss and Compression Rate 
+
+Table 12 provides full results for test loss (cross-entropy), which shows the same trends as the results for relative performance of Rouge-L (Table 7). 
+
+H.9. Agreement and Compression Rate 
+
+Table 13 provides full results for agreement , which shows the same trends as the results for relative performance of Rouge-L (Table 7). Note that agreement measures the exact match in task generations between the uncompressed LoRA model and the compressed LoRA model, rather than comparing to the task’s ground truth data. The comparison is very strict and requires an exact match between the generations of the two models (LoRA and the compressed LoRA), comparing each sample one at a time. 
+
+H.10. Reconstruction Error and Compression Rate 
+
+Table 14 provides the full results of the experiments behind Figure 3 for every evaluation task. 
+
+H.11. Reconstruction Error: Trained vs. Random 
+
+Table 15 provides the reconstruction error on random (untrained) LoRA matrices. Comparing with Table 14, we find that reconstruction error is consistently higher on random (untrained LoRA) matrices than on trained LoRA matrices. This demonstrates that after training, LoRAs have a shared structure that JD exploits. 
+
+H.12. Convergence 
+
+Table 16 presents outcomes where the JD-Full algorithm is executed until convergence. Our convergence criterion is defined as follows: 
+
+max 
+
+
+
+∥Ut+1 − UtU ⊤ 
+
+> t
+
+Ut+1 ∥Fro /∥Ut+1 ∥Fro , ∥Vt+1 − VtV ⊤ 
+
+> t
+
+Vt+1 ∥Fro /∥Vt+1 ∥Fro 
+
+
+
+< τ (19) where the tolerance threshold τ is set to 0.001. Due to the slow per-iteration computation times of the primary JD-Full algorithm, which quickly reaches an approximate optimum but then has a long tail of convergence for final digits of precision, we devised an alternative eigenvalue iteration algorithm (Appendix A.2) optimized for GPU acceleration. Our analysis indicates that adherence to this convergence criterion does not significantly alter the results. 
+
+H.13. Out-of-distribution Performance (LoRA-hub) 
+
+For completeness, we incorporate results using the protocol of LoRA-hub (Huang et al., 2024). That is, 100 LoRA-adapters are sampled, independent of the evaluation task, representing a measure of out-of-distribution performance. This also means that each result on a task is averaged across all 100 LoRA-adapters (as there is no a priori LoRA-to-task mapping). These results were obtained without normalizing the LoRA-adapters before applying the JD algorithms, a step we later identified as beneficial. We present performance comparison in Table 18. Table 17 presents the average agreement between uncompressed and compressed LoRA across 10 evaluation tasks. Results per task for JD-diagonal and JD-full are shown in Table 19 and Table 20, respectively. From these tables, we find that the JD algorithms successfully maintain performance in this out-of-distribution context. 
+
+22 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Table 3: List of all 1000 Tasks 
+
+Task ID Description Task ID Description Task ID Description 
+
+task100 concatenate all elements from index i to j task1009 pib translation bengali hindi task101 reverse and concatenate all elements from index i to j task102 commongen sentence generation task1023 pib translation english hindi task1024 pib translation hindi english task104 semeval 2019 task10 closed vocabulary mathematical answer generation task1047 pib translation english telugu task1048 pib translation telugu english task105 story cloze-rocstories sentence generation task1053 pib translation hindi urdu task1057 pib translation english urdu task1062 pib translation marathi bengali task107 splash question to sql task1079 pib translation english gujarati task108 contextualabusedetection classification task1082 pib translation marathi hindi task1083 pib translation marathi tamil task1085 pib translation english marathi task1087 two number sum task1088 array of products task1089 check monotonic array task109 smsspamcollection spamsmsdetection task1090 ted translation en gl task1094 ted translation en pt task1095 ted translation ja gl task1097 ted translation ja pl task1098 ted translation ja fa task110 logic2text sentence generation task1101 ted translation es it task1102 ted translation es pl task1105 ted translation ar gl task1106 ted translation ar it task1109 ted translation ar pt task111 asset sentence simplification task1110 ted translation he gl task1111 ted translation he it task1113 ted translation he fa task1114 ted translation he pt task1115 alt ja id translation task1116 alt id ja translation task1117 alt ja id answer generation task1118 alt ja fil translation task112 asset simple sentence identification task1120 alt ja fil answer generation task1122 alt khm ja translation task1127 alt ja th translation task1128 alt th ja translation task113 count frequency of letter task1130 xcsr vi commonsense mc classification task1132 xcsr ur commonsense mc classification task1135 xcsr en commonsense mc classification task1139 xcsr ru commonsense mc classification task114 is the given word longest task1140 xcsr pl commonsense mc classification task1141 xcsr zh commonsense mc classification task1142 xcsr ar commonsense mc classification task1144 xcsr sw commonsense mc classification task1145 xcsr jap commonsense mc classification task1146 country capital task1147 country currency task1148 maximum ascii value task1149 item check edible task115 help advice classification task1150 delete max min task1151 swap max min task1152 bard analogical reasoning causation task1154 bard analogical reasoning travel task1156 bard analogical reasoning tools task1157 bard analogical reasoning rooms for containers task1158 bard analogical reasoning manipulating items task116 com2sense commonsense reasoning task1167 penn treebank coarse pos tagging task1168 brown coarse pos tagging task117 spl translation en de task118 semeval 2019 task10 open vocabulary mathematical answer generation task1186 nne hrngo classification task1188 count max freq char task1189 check char in string task119 semeval 2019 task10 geometric mathematical answer generation task1190 add integer to list task1191 food veg nonveg task1192 food flavor profile task1193 food course classification task1194 kth largest element task1196 atomic classification oeffect task1197 atomic classification oreact task1198 atomic classification owant task1199 atomic classification xattr task1200 atomic classification xeffect task1201 atomic classification xintent task1202 atomic classification xneed task1203 atomic classification xreact task1204 atomic classification hinderedby task1205 atomic classification isafter task1206 atomic classification isbefore task1207 atomic classification atlocation task1208 atomic classification xreason task1209 atomic classification objectuse task121 zest text modification task1210 atomic classification madeupof task1211 atomic classification hassubevent task1212 atomic classification hasproperty task1213 atomic classification desires task1214 atomic classification xwant task1215 atomic classification capableof task1216 atomic classification causes task1217 atomic answer generation task1219 ted translation en es task122 conala list index addition task1221 ted translation en he task1222 ted translation ja en task1224 ted translation ja ar task1225 ted translation ja he task1226 ted translation es en task1227 ted translation es ja task1228 ted translation es ar task1229 ted translation es he task123 conala sort dictionary task1232 ted translation ar es task1233 ted translation ar he task1235 ted translation he ja task1236 ted translation he es task1237 ted translation he ar task1238 ted translation gl en task1239 ted translation gl ja task124 conala pair averages task1240 ted translation gl es task1241 ted translation gl ar task1242 ted translation gl he task1244 ted translation gl pl task1245 ted translation gl fa task1246 ted translation gl pt task1247 ted translation it en task1248 ted translation it ja task125 conala pair differences task1252 ted translation it gl task1254 ted translation it fa task1255 ted translation it pt task1257 ted translation pl ja task1258 ted translation pl es task126 scan structured text generation command action all task1261 ted translation pl gl task1262 ted translation pl it task1263 ted translation pl fa task1264 ted translation pl pt task1266 ted translation fa ja task1267 ted translation fa es task127 scan long text generation action command all task1270 ted translation fa gl task1271 ted translation fa it task1272 ted translation fa pl task1273 ted translation fa pt task1274 ted translation pt en task1276 ted translation pt es task1278 ted translation pt he task1279 ted translation pt gl task128 scan structured text generation command action short task1280 ted translation pt it task1281 ted translation pt pl task1283 hrngo quality classification task1284 hrngo informativeness classification task1285 kpa keypoint matching task1286 openbookqa question answering task1288 glue mrpc paraphrasing task1289 trec classification task129 scan long text generation action command short task1292 yelp review full text categorization task1293 kilt tasks hotpotqa question answering task1294 wiki qa answer verification task130 scan structured text generation command action long task1308 amazonreview category classification task1309 amazonreview summary classification task131 scan long text generation action command long task1310 amazonreview rating classification task1311 amazonreview rating classification task1312 amazonreview polarity classification task1313 amazonreview polarity classification task1314 country abbreviation task1315 find range array task1316 remove duplicates string task1317 country calling code task1318 country national dish task1319 country by barcode prefix task132 dais text modification task1320 country domain tld task1321 country continent task1322 country government type task1323 open subtitles hi en translation task1324 open subtitles te en translation task1325 qa zre question generation on subject relation task1326 qa zre question generation from answer task1327 qa zre answer generation from question task1328 qa zre relation generation from question task1330 open subtitles en te translation task1331 reverse array task1332 check leap year task1333 check validity date ddmmyyyy task1336 peixian equity evaluation corpus gender classifier task1338 peixian equity evaluation corpus sentiment classifier task1339 peixian equity evaluation corpus text completion task1340 msr text compression compression task1341 msr text classification task1342 amazon us reviews title task1346 glue cola grammatical correctness classification task1347 glue sts-b similarity classification task1351 opus100 translation gu en task1352 hind encorp translation hi en task1353 hind encorp translation en hi task1354 sent comp classification task1355 sent comp summarization task1359 numer sense answer generation task1360 numer sense multiple choice qa generation task1364 hans answer generation task137 detoxifying-lms classification toxicity task1370 newscomm classification task1371 newscomm translation task1373 newscomm translation task1375 newscomm translation task1377 newscomm translation task1378 quarel correct answer generation task1379 quarel incorrect answer generation task138 detoxifying-lms classification fluency task1380 quarel correct option generation task1381 quarel incorrect option generation task1382 quarel write correct answer task1383 quarel write incorrect answer task1384 deal or no dialog classification task1385 anli r1 entailment task1386 anli r2 entailment task1387 anli r3 entailment task1389 hellaswag completion task139 detoxifying-lms classification topicality task1390 wscfixed coreference task1391 winogrande easy answer generation task1393 superglue copa text completion task1394 meta woz task classification task1397 europa ecdc tm fr en translation task1398 obqa question generation task1399 obqa answer generation task140 detoxifying-lms classification style task1400 obqa incorrect answer generation task1401 obqa sentence generation task1403 check validity date mmddyyyy task1404 date conversion task1405 find median task1406 kth smallest element task1409 dart text generation task141 odd-man-out classification category task1412 web questions question answering task1418 bless semantic relation classification task1419 mathqa gain task142 odd-man-out classification no category task1420 mathqa general task1421 mathqa other task1422 mathqa physics task1423 mathqa geometry task1424 mathqa probability task1425 country iso numeric task1426 country independence year task1427 country region in world task1428 country surface area task1429 evalution semantic relation classification task143 odd-man-out classification generate category task1431 head qa answer generation task1432 head qa language translation en to es task1433 head qa language translation es to en task1434 head qa classification task1435 ro sts parallel language translation ro to en task144 subjqa question answering task1443 string to number task1444 round power of two task1445 closest integers task1446 farthest integers task1447 drug extraction ade task1448 disease entity extraction ncbi dataset task1449 disease entity extraction bc5cdr dataset task145 afs argument similarity death penalty task1451 drug dose extraction task1452 location entity extraction btc corpus task1453 person entity extraction btc corpus task146 afs argument similarity gun control task147 afs argument similarity gay marriage task1479 organization entity extraction btc corpus task148 afs argument quality gay marriage task1480 gene extraction jnlpba dataset task1481 gene extraction bc2gm dataset task1482 gene extraction chemprot dataset task1483 chemical extraction chemprot dataset task1484 gene extraction linnaeus dataset task1485 organ extraction anem dataset task1486 cell extraction anem dataset task1487 organism substance extraction anem dataset task1488 sarcasmdetection headline classification task1489 sarcasmdetection tweet classification task149 afs argument quality death penalty task1490 bengali personal hate speech binary classification task1491 bengali political hate speech binary classification task1492 bengali religious hate speech binary classification task1494 bengali hate speech classification task1495 adverse drug event classification task1496 bengali reviews sentiment classification task1498 24hour to 12hour clock task150 afs argument quality gun control task1502 hatexplain classification task1503 hatexplain classification task1504 hatexplain answer generation task1505 root09 semantic relation classification task1506 celebrity minimal dob span task1507 boolean temporal reasoning task1508 wordnet antonyms task1509 evalution antonyms task151 tomqa find location easy clean task1510 evalution relation extraction task1517 limit classfication task1518 limit answer generation task1519 qa srl question generation task152 tomqa find location easy noise task1520 qa srl answer generation task1529 scitail1.1 classification task153 tomqa find location hard clean task1533 daily dialog formal classification task1534 daily dialog question classification task1537 tamil offenseval dravidian classification task1538 malayalam offenseval dravidian classification task1541 agnews classification task1542 every ith element from starting task1544 conll2002 named entity recognition answer generation task1545 conll2002 person name extraction answer generation task1548 wiqa binary classification task1549 wiqa answer generation missing step task155 count nouns verbs task1551 every ith element from kth element task1557 jfleg answer generation task1559 blimp binary classification task156 codah classification adversarial task1560 blimp binary classification task1562 zest text modification task1564 triviaqa answer generation task1565 triviaqa classification task1566 propara structured text generation task1567 propara question generation task1568 propara classification task157 count vowels and consonants task1572 samsum summary task1573 samsum classification task1574 amazon reviews multi language identification task1575 amazon reviews multi sentiment classification task1576 amazon reviews multi english language classification task1577 amazon reviews multi japanese language classification task158 count frequency of words task1580 eqasc-perturbed question generation task1581 eqasc-perturbed answer generation task1582 bless hypernym generation task1583 bless meronym classification task1584 evalution meronym classification task1585 root09 hypernym generation task159 check frequency of words in sentence pair task1590 diplomacy text generation task1592 yahoo answers topics classfication task1593 yahoo answers topics classification task1594 yahoo answers topics question generation task1595 event2mind text generation 1 task1596 event2mind text generation 2 task1598 nyc long text generation task1599 smcalflow classification task160 replace letter in a sentence task1600 smcalflow sentence generation task1601 webquestions answer generation task1602 webquestion question genreation task1603 smcalflow sentence generation task1604 ethos text classification task1605 ethos text classification task1606 ethos text classification task1607 ethos text classification task1608 xquad en answer generation task1609 xquad en question generation task161 count words containing letter task1610 xquad es answer generation task1616 cc alligned translate eng tel task1617 cc alligned translate tel eng task1618 cc alligned classify tel eng task162 count words starting with letter task1622 disfl qa text modication task163 count words ending with letter task1631 openpi answer generation task1645 medical question pair dataset text classification task1646 dataset card for catalonia independence corpus text classification task1648 opus books en-sv translation task1649 opus books en-no translation task1651 opus books en-es translation task1652 opus books ca-en translation task1655 mkb translation task1656 gooaq answer generation task1657 gooaq question generation task166 clariq sentence generation task1660 super glue question generation task1661 super glue classification task1662 cedr ru classification task1665 trainglecopa question generation task1669 md gender bias text modification task167 strategyqa question generation task1670 md gender bias text modification task1676 xquad-ca translation task1677 xquad-ca translation task1678 mathqa answer selection task168 strategyqa question decomposition task1685 menyo20k translation task1686 menyo20k translation task1689 qed amara translation task169 strategyqa sentence generation task1690 qed amara translation task1691 qed amara translation task1703 ljspeech textmodification task1704 ljspeech textmodification task1705 ljspeech classification task1706 ljspeech classification task171 spl translation en es task1711 poki text generation task1712 poki classification task1713 convai3 sentence generation task1714 convai3 sentence generation task172 spl translation en fa task1720 civil comments toxicity classification task1721 civil comments obscenity classification task1722 civil comments threat classification task1723 civil comments sexuallyexplicit classification task1724 civil comments insult classification task1725 civil comments severtoxicity classification task1726 mathqa correct answer generation task1727 wiqa what is the effect task1728 web nlg data to text task1729 personachat generate next task1731 quartz question answering task174 spl translation en ja task175 spl translation en pl task176 break decompose questions task177 para-nmt paraphrasing task178 quartz question answering task179 participant extraction task180 intervention extraction task181 outcome extraction task183 rhyme generation task184 break generate question task190 snli classification task192 hotpotqa sentence generation task195 sentiment140 classification task196 sentiment140 answer generation task201 mnli neutral classification task202 mnli contradiction classification task205 remove even elements task206 collatz conjecture task207 max element lists task208 combinations of list task209 stancedetection classification task210 logic2text structured text generation task211 logic2text classification task219 rocstories title answer generation task022 cosmosqa passage inappropriate binary task223 quartz explanation generation task227 clariq classification task228 arc answer generation easy task229 arc answer generation hard task023 cosmosqa question generation task024 cosmosqa answer generation task243 count elements in set intersection task244 count elements in set union task245 check presence in set intersection task246 dream question generation task247 dream answer generation task249 enhanced wsc pronoun disambiguation task025 cosmosqa incorrect answer generation task250 spl translation en ar task251 spl translation en fi task254 spl translation fi en task255 spl translation it en task257 spl translation ar en task260 spl translation zh en task261 spl translation es en task262 spl translation ja en task263 spl translation pl en task265 paper reviews language identification task266 paper reviews reviewer perspective classification task267 concatenate and reverse all elements from index i to j task269 csrg counterfactual story generation task270 csrg counterfactual context generation task272 europarl translation task273 europarl classification task274 overruling legal classification task275 enhanced wsc paraphrase generation task276 enhanced wsc classification task277 stereoset sentence generation stereotype task278 stereoset sentence generation antistereotype task279 stereoset classification stereotype task280 stereoset classification stereotype type task283 dream incorrect answer generation task284 imdb classification task285 imdb answer generation task286 olid offense judgment task288 gigaword summarization task290 tellmewhy question answerability task291 semeval 2020 task4 commonsense validation task292 storycommonsense character text generation task293 storycommonsense emotion text generation task294 storycommonsense motiv text generation task295 semeval 2020 task4 commonsense reasoning task296 storycloze correct end classification task297 storycloze incorrect end classification task298 storycloze correct end classification task299 storycloze sentence generation task300 storycloze order generation task304 numeric fused head resolution task305 jeopardy answer generation normal task306 jeopardy answer generation double task307 jeopardy answer generation final task308 jeopardy answer generation all task312 europarl sv en translation task315 europarl sv-en language identification task316 crows-pairs classification stereotype task317 crows-pairs classification stereotype type task318 stereoset classification gender task319 stereoset classification profession task320 stereoset classification race task321 stereoset classification religion task322 jigsaw classification threat task323 jigsaw classification sexually explicit task324 jigsaw classification disagree task325 jigsaw classification identity attack task326 jigsaw classification obscene task327 jigsaw classification toxic task328 jigsaw classification insult task329 gap classification task033 winogrande answer generation task330 gap answer generation task333 hateeval classification hate en task334 hateeval classification hate es task335 hateeval classification aggresive en task336 hateeval classification aggresive es task337 hateeval classification individual en task034 winogrande question modification object task340 winomt classification gender pro task341 winomt classification gender anti task342 winomt classification profession pro task343 winomt classification profession anti task344 hybridqa answer generation task345 hybridqa answer generation task346 hybridqa classification task347 hybridqa incorrect answer generation task035 winogrande question modification person task350 winomt classification gender identifiability pro task351 winomt classification gender identifiability anti task353 casino classification negotiation elicit pref task354 casino classification negotiation no need task355 casino classification negotiation other need task356 casino classification negotiation self need task357 casino classification negotiation small talk task358 casino classification negotiation uv part task359 casino classification negotiation vouch fair task362 spolin yesand prompt response sub classification task363 sst2 polarity classification task364 regard social impact classification task365 synthetic remove vowels task366 synthetic return primes task367 synthetic remove floats task368 synthetic even or odd calculation task369 synthetic remove odds task370 synthetic remove divisible by 3 task371 synthetic product of list task372 synthetic palindrome numbers task373 synthetic round tens place task374 synthetic pos or neg calculation task375 classify type of sentence in debate task376 reverse order of words task377 remove words of given length task378 reverse words of given length task379 agnews topic classification task380 boolq yes no question task381 boolq question generation task382 hybridqa answer generation task383 matres classification task384 socialiqa question classification task385 socialiqa incorrect answer generation task386 semeval 2018 task3 irony detection task387 semeval 2018 task3 irony classification task388 torque token classification task389 torque generate temporal question task039 qasc find overlapping words task390 torque text span selection task391 causal relationship task393 plausible result generation task397 semeval 2018 task1 tweet anger detection task398 semeval 2018 task1 tweet joy detection task399 semeval 2018 task1 tweet sadness detection task400 paws paraphrase classification task403 creak commonsense inference task406 mickey fr sentence perturbation generation task408 mickey it sentence perturbation generation task409 mickey nl sentence perturbation generation task410 mickey ru sentence perturbation generation task411 mickey vi sentence perturbation generation task413 mickey en sentence perturbation generation task414 mickey ar sentence perturbation generation task415 mickey bg sentence perturbation generation task416 mickey de sentence perturbation generation task417 mickey es sentence perturbation generation task424 hindienglish corpora hi en translation task425 hindienglish corpora en hi translation task426 hindienglish corpora hi-en classification task428 senteval inversion task429 senteval tense task043 essential terms answering incomplete questions task430 senteval subject count task431 senteval object count task434 alt en hi answer generation task435 alt en ja translation task436 alt ja en translation task437 alt en ja answer generation task438 eng guj parallel corpus en gu translation task439 eng guj parallel corpus gu en translation task044 essential terms identifying essential words task440 eng guj parallel corpus gu-en classification task441 eng guj parallel corpus gu-en language identification task442 com qa paraphrase question generation task446 opus paracrawl en so translation task448 opus paracrawl en tl translation task449 opus paracrawl ig en translation task045 miscellaneous sentence paraphrasing task450 opus paracrawl so en translation task452 opus paracrawl en ig translation task453 swag answer generation task454 swag incorrect answer generation task455 swag context generation task456 matres intention classification task457 matres conditional classification task458 matres negation classification task459 matres static classification task046 miscellaneous question typing task460 qasper answer generation task461 qasper question generation task462 qasper classification task047 miscellaneous answering science questions task471 haspart answer generation task472 haspart classification task475 yelp polarity classification task477 cls english dvd classification task483 cls french dvd classification task488 extract all alphabetical elements from list in order task489 mwsc question generation task490 mwsc options generation task491 mwsc answer generation task492 mwsc incorrect answer generation task493 review polarity classification task494 review polarity answer generation task495 semeval headline classification task496 semeval answer generation task497 extract all numbers from list in order task499 extract and add all numbers from list task050 multirc answerability task504 count all alphabetical elements in list task505 count all numerical elements in list task506 position of all alphabetical elements in list task507 position of all numerical elements in list task509 collate of all alphabetical and numerical elements in list separately task512 twitter emotion classification task513 argument stance classification task514 argument consequence classification task515 senteval odd word out task516 senteval conjoints inversion task517 emo classify emotion of dialogue task518 emo different dialogue emotions task521 trivia question classification task523 find if numbers or alphabets are more in list task530 europarl en es translation task531 europarl es en translation task532 europarl en-es classification task533 europarl es-en language identification task535 alt translation ch en task537 alt translation th en task539 alt translation ma en task541 alt translation kh en task542 alt translation ja en task543 alt translation bh en task547 alt translation entk en task550 discofuse sentence generation task551 alt translation en th task560 alt translation en entk task561 alt translation en bg task563 discofuse answer generation task564 discofuse classification task565 circa answer generation task566 circa classification task567 circa text generation task568 circa question generation task573 air dialogue classification task574 air dialogue sentence generation task575 air dialogue classification task576 curiosity dialogs answer generation task577 curiosity dialogs classification task579 socialiqa classification task580 socialiqa answer generation task581 socialiqa question generation task582 naturalquestion answer generation task583 udeps eng coarse pos tagging task584 udeps eng fine pos tagging task585 preposition classification task586 amazonfood polarity classification task587 amazonfood polarity correction classification task588 amazonfood rating classification task589 amazonfood summary text generation task059 ropes story generation task590 amazonfood summary correction classification task591 sciq answer generation task592 sciq incorrect answer generation task593 sciq explanation generation task594 sciq question generation task595 mocha answer generation task596 mocha question generation task600 find the longest common substring in two strings task601 flores translation sntoen task604 flores translation entosn task605 find the longest common subsequence in two lists task606 sum of all numbers in list between positions i and j task607 sbic intentional offense binary classification task608 sbic sexual offense binary classification task609 sbic potentially offense binary classification task610 conllpp ner task614 glucose cause event detection task615 moviesqa answer generation task616 cola classification task617 amazonreview category text generation task618 amazonreview summary text generation task619 ohsumed abstract title generation task062 bigbench repeat copy logic task620 ohsumed medical subject headings answer generation task622 replace alphabets in a list by their position in english alphabet task625 xlwic true or false answer generation task626 xlwic sentence based on given word sentence generation task627 xlwic word with same meaning sentence generation task628 xlwic word with different meaning sentence generation task629 dbpedia 14 classification task063 first i elements task630 dbpedia 14 classification task631 dbpedia 14 incorrect answer generation task632 dbpedia 14 classification task633 dbpedia 14 answer generation task636 extract and sort unique alphabets in a list task637 extract and sort unique digits in a list task638 multi woz classification task639 multi woz user utterance generation task064 all elements except first i task640 esnli classification task641 esnli classification task642 esnli classification task643 refresd classification task645 summarization task648 answer generation task065 timetravel consistent sentence classification task651 opus100 en ar translation task652 parsinlu en fa translation task653 parsinlu fa en translation task654 bible fa en translation task657 quran fa en translation task659 tep fa en translation task066 timetravel binary consistency classification task660 mizan fa en translation task662 global voices fa en translation task664 mmmlu answer generation abstract algebra task665 mmmlu answer generation anatomy task666 mmmlu answer generation astronomy task667 mmmlu answer generation business ethics task067 abductivenli answer generation task670 ambigqa question generation task671 ambigqa text generation task672 nummersense task673 google wellformed query classification task674 google wellformed query sentence generation task675 google wellformed query sentence generation task679 hope edi english text classification task068 abductivenli incorrect answer generation task680 hope edi tamil text classification task681 hope edi malayalam text classification task682 online privacy policy text classification task683 online privacy policy text purpose answer generation task684 online privacy policy text information type generation task685 mmmlu answer generation clinical knowledge task686 mmmlu answer generation college biology task687 mmmlu answer generation college chemistry task688 mmmlu answer generation college computer science task689 mmmlu answer generation college mathematics task069 abductivenli classification task691 mmmlu answer generation college physics task692 mmmlu answer generation computer security task693 mmmlu answer generation conceptual physics task694 mmmlu answer generation econometrics task695 mmmlu answer generation electrical engineering task696 mmmlu answer generation elementary mathematics task697 mmmlu answer generation formal logic task698 mmmlu answer generation global facts task699 mmmlu answer generation high school biology task070 abductivenli incorrect classification task700 mmmlu answer generation high school chemistry task701 mmmlu answer generation high school computer science task703 mmmlu answer generation high school geography task704 mmmlu answer generation high school government and politics task705 mmmlu answer generation high school macroeconomics task706 mmmlu answer generation high school mathematics task707 mmmlu answer generation high school microeconomics task708 mmmlu answer generation high school physics task709 mmmlu answer generation high school psychology task071 abductivenli answer generation task710 mmmlu answer generation high school statistics task713 mmmlu answer generation human aging task714 mmmlu answer generation human sexuality task715 mmmlu answer generation international law task716 mmmlu answer generation jurisprudence task717 mmmlu answer generation logical fallacies task718 mmmlu answer generation machine learning task719 mmmlu answer generation management task072 abductivenli answer generation task720 mmmlu answer generation marketing task721 mmmlu answer generation medical genetics task722 mmmlu answer generation random topic task723 mmmlu answer generation moral disputes task724 mmmlu answer generation moral scenarios task725 mmmlu answer generation nutrition task726 mmmlu answer generation philosophy task727 mmmlu answer generation prehistory task728 mmmlu answer generation professional accounting task073 commonsenseqa answer generation task731 mmmlu answer generation professional psychology task732 mmmlu answer generation public relations task733 mmmlu answer generation security studies task734 mmmlu answer generation sociology task735 mmmlu answer generation us foreign policy task736 mmmlu answer generation virology task737 mmmlu answer generation world religions task739 lhoestq question generation task074 squad1.1 question generation task740 lhoestq answer generation quantity task741 lhoestq answer generation place task742 lhoestq answer generation frequency task745 ai2 arithmetic questions arithmetic task746 yelp restaurant review classification task075 squad1.1 answer generation task750 aqua multiple choice answering task751 svamp subtraction question answering task752 svamp multiplication question answering task753 svamp addition question answering task754 svamp common-division question answering task755 find longest substring and replace its sorted lowercase version in both lists task756 find longert substring and return all unique alphabets in it task076 splash correcting sql mistake task761 app review classification task762 emea fr sk translation task764 emea bg el classification task769 qed summarization task077 splash explanation to sql task770 pawsx english text modification task771 pawsx korean text modification task772 pawsx french text modification task774 pawsx german text modification task775 pawsx chinese text modification task776 pawsx japanese text modification task777 pawsx english korean translation task778 pawsx english french translation task779 pawsx english spanish translation task078 all elements except last i task784 pawsx korean french translation task785 pawsx korean spanish translation task787 pawsx korean chinese translation task788 pawsx korean japanese translation task789 pawsx french english translation task079 conala concat strings task790 pawsx french korean translation task792 pawsx french german translation task794 pawsx french japanese translation task795 pawsx spanish english translation task796 pawsx spanish korean translation task797 pawsx spanish french translation task799 pawsx spanish chinese translation task080 piqa answer generation task802 pawsx german korean translation task803 pawsx german french translation task804 pawsx german spanish translation task805 pawsx german chinese translation task808 pawsx chinese korean translation task809 pawsx chinese french translation task081 piqa wrong answer generation task810 pawsx chinese spanish translation task811 pawsx chinese german translation task813 pawsx japanese english translation task814 pawsx japanese korean translation task815 pawsx japanese french translation task817 pawsx japanese german translation task819 pec sentiment classification task082 babi t1 single supporting fact question generation task820 protoqa answer generation task821 protoqa question generation task823 peixian-rtgender sentiment analysis task828 copa commonsense cause effect task083 babi t1 single supporting fact answer generation task830 poleval2019 mt translation task831 giga fren classification task832 poleval2019 mt classification task833 poem sentiment classification task834 mathdataset classification task835 mathdataset answer generation task838 cdt classification task839 cdt classification task084 babi t1 single supporting fact identify relevant fact task840 para pdt en es translation task841 para pdt de en translation task843 financial phrasebank classification task844 financial phrasebank classification task846 pubmedqa classification task085 unnatural addsub arithmetic task850 synthetic longest palindrome task851 synthetic multiply evens task852 synthetic multiply odds task856 conv ai 2 classification task857 inquisitive question generation task858 inquisitive span detection task859 prost question generation task086 translated symbol arithmetic task860 prost mcq generation task861 prost mcq answers generation task862 asdiv multidiv question answering task863 asdiv multiop question answering task864 asdiv singleop question answering task865 mawps addsub question answering task866 mawps multidiv question answering task867 mawps multiop question answering task868 mawps singleop question answering task087 new operator addsub arithmetic task872 opus xhosanavy translation eng xhosa task873 opus xhosanavy translation xhosa eng task874 opus xhosanavy sr task875 emotion classification task877 kde4 translation task878 kde4 translation task879 schema guided dstc8 classification task088 identify typo verification task888 reviews classification task889 goemotions classification task089 swap words verification task890 gcwd classification task891 gap coreference resolution task892 gap reverse coreference resolution task893 gap fill the blank coreference resolution task896 miam language classification task897 freebase qa topic question generation task898 freebase qa answer generation task899 freebase qa topic generation task090 equation learner algebra task900 freebase qa category classification task901 freebase qa category question generation task902 deceptive opinion spam classification task903 deceptive opinion spam classification task904 hate speech offensive classification task905 hate speech offensive classification task908 dialogre identify familial relationships task909 dialogre prevalent speakers task091 all elements from index i to j task910 bianet classification task911 bianet translation task913 bianet translation task914 bianet translation task092 check prime classification task922 event2mind word generation task923 event2mind classifier task924 event2mind word generation task925 coached conv pref classifier task926 coached conv pref word generation task927 yelp negative to positive style transfer task928 yelp positive to negative style transfer task929 products reviews classification task093 conala normalize lists task933 wiki auto style transfer task934 turk simplification task936 defeasible nli snli classification task094 conala calculate mean task095 conala max absolute value task955 wiki auto style transfer task956 leetcode 420 strong password check task096 conala list index subtraction task961 ancora-ca-ner text auto completion task962 ancora-ca-ner missing word prediction task963 librispeech asr next word prediction task964 librispeech asr text auto completion task965 librispeech asr missing word prediction task966 ruletaker fact checking based on given context task967 ruletaker incorrect fact generation based on given paragraph task097 conala remove duplicates task098 conala list intersection task982 pib translation tamil bengali task099 reverse elements between index i and j task990 pib translation urdu marathi task991 pib translation english tamil task995 pib translation bengali english task996 pib translation english bengali 
+
+23 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Table 4: Results for Different Numbers of Clusters (different LoRA-ranks) 
+
+Metric Uncompressed 1 Cluster 2 Clusters 4 Clusters 8 Clusters 
+
+Loss 0.5009 1.6023 0.9986 0.5603 0.5000 Exact match 69.6103 37.3392 60.1071 66.6474 69.6289 ROUGE-1 79.5755 50.3598 71.5644 76.2930 79.0576 ROUGE-L 78.9355 49.7491 71.0193 75.6152 78.3958 Recon. error 0 0.8311 0.6990 0.4846 0.3246 Agreement 1.0 36.6706 62.6699 72.2231 80.5545 Exact match ratio 1.0 0.5724 0.8079 0.9219 0.9541 Relative ROUGE-1 1.0 0.6220 0.8533 0.9406 0.9917 Relative ROUGE-L 1.0 0.6221 0.8550 0.9404 0.9915 Param. saved ratio 1.0 0.99 0.98 0.97 0.94 Table 5: Results for Different Numbers of Clusters (same LoRA-ranks of 43) 
+
+Metric Uncompressed 1 Cluster 2 Clusters 4 Clusters 8 Clusters 
+
+Loss 0.5764 0.7767 0.6277 0.5841 0.5659 Exact match 61.7746 53.2000 60.2000 61.5000 61.3000 ROUGE-1 79.9322 74.7695 79.4621 80.6950 80.4298 ROUGE-L 77.7961 72.4257 77.2141 78.3369 78.1883 Recon. error 0 0.7333 0.5594 0.3999 0.2502 Agreement 1.0 0.0000 6.6667 6.6667 6.6667 Exact match ratio 1.0 0.8175 0.9261 0.9618 1.0206 Relative ROUGE-1 1.0 0.9560 1.0153 1.0310 1.0241 Relative ROUGE-L 1.0 0.9501 1.0118 1.0268 1.0231 Param. saved ratio 1.0 0.99 0.98 0.97 0.94 24 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Model Type Method Type Tasks Average Para. Saved task039 task190 task280 task290 task391 task442 task620 task1342 task1391 task1598 base 0.26 ± 0.00 0.02 ± 0.00 0.19 ± 0.00 0.42 ± 0.00 0.11 ± 0.00 0.47 ± 0.00 0.11 ± 0.00 0.23 ± 0.00 0.19 ± 0.00 0.77 ± 0.00 0.28 ± 0.21 1.00/1.00 lora 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.00/0.00 TIES 10 0.81 ± 0.00 0.57 ± 0.02 0.45 ± 0.04 0.10 ± 0.01 0.83 ± 0.01 0.47 ± 0.00 0.69 ± 0.01 0.57 ± 0.00 0.82 ± 0.01 0.85 ± 0.00 0.62 ± 0.23 1.00 / 1.00 50 0.59 ± 0.00 0.41 ± 0.00 0.18 ± 0.05 0.03 ± 0.01 0.91 ± 0.01 0.31 ± 0.00 0.65 ± 0.00 0.62 ± 0.00 0.32 ± 0.04 0.84 ± 0.00 0.48 ± 0.28 1.00 / 1.00 100 0.55 ± 0.00 0.40 ± 0.00 0.20 ± 0.05 0.01 ± 0.02 0.88 ± 0.00 0.33 ± 0.00 0.64 ± 0.00 0.57 ± 0.02 0.01 ± 0.00 0.82 ± 0.00 0.44 ± 0.30 1.00 / 1.00 500 0.37 ± 0.00 0.26 ± 0.00 0.01 ± 0.00 0.00 ± 0.00 0.83 ± 0.00 0.29 ± 0.00 0.57 ± 0.00 0.37 ± 0.00 0.01 ± 0.00 0.43 ± 0.00 0.31 ± 0.26 1.00 / 1.00 SVD SVD 2 0.98 ± 0.03 1.07 ± 0.02 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.98 ± 0.01 1.00 ± 0.01 1.00 ± 0.10 1.00 ± 0.01 1.00 ± 0.01 1.00 ± 0.04 0.88 / 0.88 SVD 4 0.99 ± 0.04 1.04 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.01 1.00 ± 0.00 0.99 ± 0.02 0.99 ± 0.08 0.99 ± 0.01 1.00 ± 0.01 1.00 ± 0.03 0.75 / 0.75 SVD 8 1.00 ± 0.00 1.02 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.01 ± 0.00 1.00 ± 0.01 1.01 ± 0.01 1.01 ± 0.00 1.00 ± 0.01 0.50 / 0.50 SVD 16 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.00 / 0.00 10 diagonal (D) 16 D 1.02 ± 0.01 1.01 ± 0.01 1.00 ± 0.00 1.00 ± 0.01 0.99 ± 0.00 0.96 ± 0.00 1.02 ± 0.02 1.13 ± 0.03 0.99 ± 0.02 0.98 ± 0.01 1.01 ± 0.05 1.00 / 0.90 32 D 1.01 ± 0.01 1.05 ± 0.01 1.00 ± 0.00 0.99 ± 0.00 1.01 ± 0.01 0.99 ± 0.00 0.97 ± 0.01 1.05 ± 0.03 1.00 ± 0.01 1.00 ± 0.01 1.00 ± 0.03 1.00 / 0.80 64 D 1.00 ± 0.00 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.01 ± 0.01 0.99 ± 0.01 1.01 ± 0.00 1.01 ± 0.00 1.00 ± 0.01 1.00 / 0.60 128 D 1.00 ± 0.00 1.01 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.01 ± 0.01 0.99 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.01 1.00 / 0.20 256 D 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 / -0.60 10 full (F) 16 F 1.02 ± 0.00 1.06 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.98 ± 0.00 1.01 ± 0.02 1.07 ± 0.00 1.01 ± 0.01 1.00 ± 0.00 1.01 ± 0.03 1.00/0.90 32 F 1.02 ± 0.01 1.04 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.00 0.96 ± 0.01 1.00 ± 0.02 1.00 ± 0.01 1.01 ± 0.00 1.00 ± 0.02 0.99/0.79 64 F 1.00 ± 0.00 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.01 ± 0.01 0.98 ± 0.01 1.01 ± 0.00 1.01 ± 0.00 1.00 ± 0.01 0.97/0.57 128 F 1.00 ± 0.00 1.01 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.88/0.07 256 F 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.50/-1.10 50 diagonal (D) 16 D 0.98 ± 0.04 0.98 ± 0.01 1.00 ± 0.00 0.92 ± 0.06 0.84 ± 0.07 0.92 ± 0.02 0.68 ± 0.05 0.87 ± 0.10 0.88 ± 0.07 0.83 ± 0.02 0.89 ± 0.10 1.00 / 0.98 32 D 1.00 ± 0.02 1.02 ± 0.02 1.00 ± 0.00 0.99 ± 0.00 0.96 ± 0.01 0.95 ± 0.02 0.84 ± 0.02 1.00 ± 0.13 0.98 ± 0.01 0.88 ± 0.01 0.96 ± 0.07 1.00 / 0.96 64 D 1.02 ± 0.00 1.05 ± 0.02 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.97 ± 0.00 0.99 ± 0.01 1.09 ± 0.03 1.01 ± 0.01 0.90 ± 0.01 1.00 ± 0.05 1.00 / 0.92 128 D 1.01 ± 0.01 1.08 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.98 ± 0.00 0.98 ± 0.01 1.11 ± 0.03 1.00 ± 0.00 1.00 ± 0.01 1.01 ± 0.04 1.00 / 0.84 256 D 1.01 ± 0.01 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.01 1.00 ± 0.00 0.97 ± 0.03 1.01 ± 0.03 1.00 ± 0.01 1.01 ± 0.01 1.00 ± 0.02 1.00 / 0.68 50 full (F) 16 F 0.99 ± 0.04 1.00 ± 0.01 1.00 ± 0.01 0.96 ± 0.01 0.95 ± 0.02 0.94 ± 0.01 0.64 ± 0.10 1.01 ± 0.15 0.97 ± 0.02 0.87 ± 0.00 0.93 ± 0.12 1.00/0.98 32 F 1.02 ± 0.00 1.00 ± 0.02 1.00 ± 0.00 1.00 ± 0.00 0.98 ± 0.01 0.96 ± 0.00 0.95 ± 0.01 1.09 ± 0.02 1.01 ± 0.02 0.89 ± 0.01 0.99 ± 0.05 0.99/0.95 64 F 1.02 ± 0.01 1.06 ± 0.02 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.98 ± 0.01 1.03 ± 0.01 1.11 ± 0.00 1.00 ± 0.01 0.98 ± 0.02 1.02 ± 0.04 0.97/0.89 128 F 1.02 ± 0.00 1.06 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.01 0.98 ± 0.00 0.98 ± 0.01 1.03 ± 0.04 1.00 ± 0.01 1.00 ± 0.00 1.01 ± 0.03 0.88/0.72 256 F 1.00 ± 0.00 1.02 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.00 1.01 ± 0.01 1.00 ± 0.00 1.01 ± 0.00 1.01 ± 0.00 1.00 ± 0.01 0.50/0.18 100 diagonal (D) 16 D 0.80 ± 0.07 0.89 ± 0.06 0.93 ± 0.03 0.96 ± 0.01 0.50 ± 0.09 0.78 ± 0.01 0.28 ± 0.07 0.52 ± 0.10 0.78 ± 0.03 0.81 ± 0.02 0.72 ± 0.22 1.00 / 0.99 32 D 0.95 ± 0.06 0.98 ± 0.01 1.00 ± 0.00 0.91 ± 0.06 0.80 ± 0.14 0.89 ± 0.06 0.60 ± 0.10 0.77 ± 0.26 0.91 ± 0.02 0.83 ± 0.02 0.86 ± 0.14 1.00 / 0.98 64 D 1.01 ± 0.03 1.01 ± 0.01 1.00 ± 0.00 0.98 ± 0.02 0.96 ± 0.01 0.94 ± 0.01 0.88 ± 0.05 1.11 ± 0.08 0.96 ± 0.02 0.87 ± 0.03 0.97 ± 0.07 1.00 / 0.96 128 D 1.01 ± 0.00 1.02 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.97 ± 0.00 1.00 ± 0.03 1.11 ± 0.02 0.99 ± 0.01 0.89 ± 0.02 1.00 ± 0.05 1.00 / 0.92 256 D 1.00 ± 0.00 1.06 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.00 0.98 ± 0.00 1.00 ± 0.01 1.11 ± 0.03 1.00 ± 0.01 0.98 ± 0.01 1.01 ± 0.04 1.00 / 0.84 100 full (F) 16 F 0.95 ± 0.01 0.97 ± 0.03 0.97 ± 0.03 0.97 ± 0.03 0.93 ± 0.01 0.92 ± 0.01 0.64 ± 0.03 0.89 ± 0.16 0.87 ± 0.02 0.83 ± 0.01 0.89 ± 0.11 1.00/0.99 32 F 1.00 ± 0.02 0.99 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 0.97 ± 0.01 0.95 ± 0.00 0.86 ± 0.03 1.12 ± 0.03 0.96 ± 0.01 0.87 ± 0.00 0.97 ± 0.07 0.99/0.97 64 F 1.02 ± 0.00 1.00 ± 0.02 1.00 ± 0.00 1.00 ± 0.00 0.98 ± 0.00 0.96 ± 0.00 0.99 ± 0.01 1.09 ± 0.01 0.99 ± 0.02 0.89 ± 0.00 0.99 ± 0.05 0.97/0.93 128 F 1.01 ± 0.01 1.05 ± 0.01 1.00 ± 0.00 0.99 ± 0.00 1.00 ± 0.00 0.98 ± 0.00 1.03 ± 0.01 1.10 ± 0.01 1.01 ± 0.00 0.99 ± 0.01 1.02 ± 0.04 0.88/0.80 256 F 1.01 ± 0.01 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.01 ± 0.00 0.99 ± 0.00 0.98 ± 0.00 1.00 ± 0.03 1.01 ± 0.00 1.01 ± 0.00 1.00 ± 0.01 0.50/0.34 100 w/clusters (C) 16 C 5 1.13 ± 0.01 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.96 ± 0.00 1.01 ± 0.02 1.23 ± 0.02 1.05 ± 0.01 0.99 ± 0.06 1.04 ± 0.08 1.00/0.95 16 C 7 1.12 ± 0.01 1.01 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.96 ± 0.01 1.02 ± 0.02 1.24 ± 0.05 1.03 ± 0.01 0.99 ± 0.05 1.04 ± 0.08 1.00/0.93 500 diagonal (D) 16 D 0.57 ± 0.07 0.55 ± 0.03 0.83 ± 0.04 0.78 ± 0.16 0.85 ± 0.04 0.68 ± 0.07 0.24 ± 0.01 0.43 ± 0.01 0.76 ± 0.06 0.79 ± 0.01 0.65 ± 0.20 1.00 / 1.00 32 D 0.61 ± 0.12 0.55 ± 0.08 0.83 ± 0.02 0.84 ± 0.12 0.91 ± 0.02 0.71 ± 0.05 0.29 ± 0.05 0.47 ± 0.08 0.79 ± 0.04 0.79 ± 0.01 0.68 ± 0.20 1.00 / 1.00 64 D 0.73 ± 0.02 0.63 ± 0.11 0.89 ± 0.04 0.97 ± 0.00 0.94 ± 0.00 0.83 ± 0.05 0.45 ± 0.09 0.50 ± 0.07 0.82 ± 0.02 0.80 ± 0.02 0.76 ± 0.18 1.00 / 0.99 128 D 0.84 ± 0.00 0.92 ± 0.02 0.97 ± 0.03 0.98 ± 0.01 0.94 ± 0.00 0.88 ± 0.02 0.60 ± 0.15 0.53 ± 0.01 0.85 ± 0.05 0.80 ± 0.02 0.83 ± 0.15 1.00 / 0.98 256 D 0.99 ± 0.03 0.99 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.96 ± 0.00 0.92 ± 0.03 0.66 ± 0.06 0.84 ± 0.14 0.92 ± 0.02 0.84 ± 0.01 0.91 ± 0.11 1.00 / 0.97 500 full (F) 16 F 0.57 ± 0.01 0.43 ± 0.07 0.78 ± 0.01 0.97 ± 0.00 0.96 ± 0.00 0.83 ± 0.01 0.64 ± 0.00 0.53 ± 0.03 0.83 ± 0.01 0.83 ± 0.00 0.75 ± 0.17 1.00/1.00 32 F 0.79 ± 0.05 0.54 ± 0.04 0.93 ± 0.02 0.98 ± 0.00 0.97 ± 0.00 0.90 ± 0.01 0.69 ± 0.01 0.50 ± 0.00 0.86 ± 0.02 0.83 ± 0.01 0.81 ± 0.16 0.99/0.99 64 F 1.02 ± 0.00 0.96 ± 0.01 0.94 ± 0.01 1.00 ± 0.01 0.96 ± 0.00 0.97 ± 0.01 0.73 ± 0.01 0.54 ± 0.01 0.91 ± 0.01 0.86 ± 0.00 0.89 ± 0.14 0.97/0.96 128 F 1.03 ± 0.01 0.97 ± 0.02 0.99 ± 0.00 1.00 ± 0.00 0.98 ± 0.00 0.96 ± 0.00 0.87 ± 0.01 1.07 ± 0.02 0.98 ± 0.00 0.87 ± 0.00 0.97 ± 0.06 0.88/0.86 256 F 1.03 ± 0.00 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.97 ± 0.01 0.99 ± 0.02 1.03 ± 0.01 1.00 ± 0.01 0.87 ± 0.00 0.99 ± 0.05 0.50/0.47 500 w/clusters (C) 16 C 7 1.09 1.00 0.99 1.00 0.98 0.95 0.72 0.87 0.98 0.90 0.95 1.00/0.98 16 C 10 1.10 1.01 1.00 0.99 0.97 0.93 0.70 1.30 1.02 0.88 0.99 1.00/0.98 16 C 25 1.10 1.00 1.00 0.99 0.99 0.96 0.98 1.31 1.03 0.91 1.03 1.00/0.95 64 C 5 1.09 0.98 1.00 1.00 0.99 0.96 0.99 1.18 1.04 0.87 1.01 0.97/0.93 64 C 7 1.12 1.02 1.00 1.00 1.00 0.96 0.99 1.22 1.04 0.93 1.03 0.97/0.91 1000 w/clusters (C) 16 C 25 1.09 0.98 1.00 1.00 0.97 0.96 0.72 1.30 1.05 0.91 1.00 1.00/0.97 
+
+Table 7: Relative In-Distribution ROUGE-L scores for various tasks and methods 25 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Model Type Method Type Tasks Average Para. Saved task039 task190 task280 task290 task391 task442 task620 task1342 task1391 task1598 base 24.44 ± 0.00 1.60 ± 0.00 19.13 ± 0.00 39.22 ± 0.00 10.27 ± 0.00 35.46 ± 0.00 7.85 ± 0.00 6.22 ± 0.00 17.82 ± 0.00 38.87 ± 0.00 20.24 ± 13.27 1.00/1.00 lora 95.00 ± 0.00 86.00 ± 0.00 99.00 ± 0.00 93.67 ± 0.00 94.33 ± 0.00 74.88 ± 0.00 74.40 ± 0.00 26.68 ± 0.00 95.00 ± 0.00 50.32 ± 0.00 78.87 ± 22.56 0.00/0.00 TIES 10 76.50 ± 0.00 49.00 ± 1.73 44.33 ± 4.04 9.80 ± 0.58 78.56 ± 0.96 35.24 ± 0.00 51.37 ± 0.67 15.26 ± 0.12 77.67 ± 1.15 42.72 ± 0.01 48.05 ± 23.61 1.00 / 1.00 50 55.80 ± 0.00 35.00 ± 0.00 18.00 ± 5.20 2.42 ± 0.50 85.78 ± 0.96 23.03 ± 0.00 48.03 ± 0.00 16.50 ± 0.00 30.00 ± 3.46 42.47 ± 0.02 35.70 ± 23.01 1.00 / 1.00 100 52.43 ± 0.00 34.00 ± 0.00 19.67 ± 4.62 1.09 ± 1.66 83.33 ± 0.00 24.89 ± 0.00 47.52 ± 0.00 15.18 ± 0.42 1.00 ± 0.00 41.19 ± 0.03 32.03 ± 24.50 1.00 / 1.00 500 35.18 ± 0.00 22.00 ± 0.00 1.00 ± 0.00 0.00 ± 0.00 78.00 ± 0.00 21.46 ± 0.00 42.22 ± 0.04 9.93 ± 0.13 1.00 ± 0.00 21.50 ± 0.03 23.27 ± 23.64 1.00 / 1.00 SVD SVD 2 93.15 ± 2.77 92.24 ± 1.85 99.09 ± 0.18 93.44 ± 0.14 93.89 ± 0.35 73.74 ± 0.51 74.55 ± 0.98 26.80 ± 2.79 95.06 ± 1.35 50.21 ± 0.44 79.11 ± 22.72 0.88 / 0.88 SVD 4 94.01 ± 3.60 89.21 ± 0.71 99.05 ± 0.09 93.65 ± 0.03 94.66 ± 0.63 74.89 ± 0.33 73.61 ± 1.15 26.34 ± 2.13 93.98 ± 0.77 50.47 ± 0.54 78.90 ± 22.68 0.75 / 0.75 SVD 8 95.00 ± 0.00 87.40 ± 0.59 99.05 ± 0.09 93.65 ± 0.03 94.36 ± 0.38 74.58 ± 0.12 75.07 ± 0.00 26.71 ± 0.27 95.51 ± 1.09 50.89 ± 0.07 81.01 ± 21.74 0.50 / 0.50 SVD 16 95.00 ± 0.00 86.00 ± 0.00 99.00 ± 0.00 93.67 ± 0.00 94.33 ± 0.00 74.90 ± 0.03 74.23 ± 0.18 26.68 ± 0.00 95.00 ± 0.00 50.30 ± 0.02 78.36 ± 22.97 0.00 / 0.00 10 diagonal (D) 16 D 96.67 ± 0.58 87.00 ± 1.00 99.00 ± 0.00 94.00 ± 0.67 93.11 ± 0.38 72.08 ± 0.06 76.26 ± 1.19 30.11 ± 0.79 94.00 ± 1.73 49.30 ± 0.46 79.15 ± 22.18 1.00 / 0.90 32 D 95.67 ± 0.58 90.00 ± 1.00 99.00 ± 0.00 93.00 ± 0.33 94.89 ± 0.51 73.86 ± 0.31 71.92 ± 0.84 27.89 ± 0.70 94.67 ± 0.58 50.36 ± 0.26 79.13 ± 22.75 1.00 / 0.80 64 D 95.00 ± 0.00 88.33 ± 0.58 99.00 ± 0.00 93.67 ± 0.00 94.78 ± 0.38 74.61 ± 0.13 74.97 ± 0.58 26.35 ± 0.25 96.00 ± 0.00 50.99 ± 0.06 79.37 ± 22.94 1.00 / 0.60 128 D 95.00 ± 0.00 86.67 ± 0.58 99.00 ± 0.00 93.67 ± 0.00 94.33 ± 0.00 74.92 ± 0.13 74.96 ± 0.51 26.45 ± 0.23 95.00 ± 0.00 50.21 ± 0.12 79.02 ± 22.84 1.00 / 0.20 256 D 95.00 ± 0.00 86.00 ± 0.00 99.00 ± 0.00 93.67 ± 0.00 94.33 ± 0.00 74.88 ± 0.00 74.40 ± 0.00 26.68 ± 0.00 95.00 ± 0.00 50.27 ± 0.02 78.92 ± 22.77 1.00 / -0.60 10 full (F) 16 F 97.00 ± 0.00 91.00 ± 1.00 99.00 ± 0.00 93.56 ± 0.19 93.56 ± 0.69 73.60 ± 0.36 74.94 ± 1.25 28.66 ± 0.03 96.00 ± 1.00 50.15 ± 0.20 79.75 ± 22.72 1.00/0.90 32 F 96.67 ± 0.58 89.33 ± 0.58 99.00 ± 0.00 93.22 ± 0.19 94.44 ± 0.19 74.11 ± 0.19 71.74 ± 0.59 26.74 ± 0.50 94.67 ± 0.58 50.63 ± 0.24 79.06 ± 23.01 0.99/0.79 64 F 95.00 ± 0.00 88.67 ± 0.58 99.00 ± 0.00 93.67 ± 0.00 94.56 ± 0.38 74.56 ± 0.13 75.47 ± 0.58 26.26 ± 0.34 96.00 ± 0.00 50.89 ± 0.17 79.41 ± 22.97 0.97/0.57 128 F 95.00 ± 0.00 86.67 ± 0.58 99.00 ± 0.00 93.67 ± 0.00 94.33 ± 0.00 75.04 ± 0.03 74.40 ± 0.00 26.53 ± 0.13 95.00 ± 0.00 50.36 ± 0.03 79.00 ± 22.81 0.88/0.07 256 F 95.00 ± 0.00 86.00 ± 0.00 99.00 ± 0.00 93.67 ± 0.00 94.33 ± 0.00 74.90 ± 0.03 74.29 ± 0.19 26.68 ± 0.00 95.00 ± 0.00 50.30 ± 0.03 78.92 ± 22.77 0.50/-1.10 50 diagonal (D) 16 D 92.76 ± 3.53 84.67 ± 1.15 99.00 ± 0.00 86.17 ± 5.81 79.68 ± 6.21 69.07 ± 1.54 50.65 ± 3.97 23.27 ± 2.60 83.90 ± 6.43 41.86 ± 0.96 71.10 ± 23.99 1.00 / 0.98 32 D 95.33 ± 2.08 87.33 ± 2.08 99.00 ± 0.00 92.60 ± 0.29 90.32 ± 1.04 71.16 ± 1.47 62.51 ± 1.64 26.60 ± 3.54 93.33 ± 1.15 44.35 ± 0.41 76.25 ± 23.81 1.00 / 0.96 64 D 97.00 ± 0.00 90.33 ± 1.53 99.00 ± 0.00 93.78 ± 0.19 93.00 ± 0.58 72.37 ± 0.35 73.39 ± 0.93 29.06 ± 0.80 95.67 ± 0.58 45.43 ± 0.34 78.90 ± 23.29 1.00 / 0.92 128 D 96.33 ± 0.58 92.67 ± 0.58 99.00 ± 0.00 93.56 ± 0.19 93.00 ± 0.58 73.32 ± 0.24 73.03 ± 1.09 29.51 ± 0.93 95.00 ± 0.00 50.16 ± 0.74 79.56 ± 22.51 1.00 / 0.84 256 D 95.67 ± 0.58 88.33 ± 0.58 99.00 ± 0.00 93.56 ± 0.19 94.67 ± 0.67 74.82 ± 0.24 72.36 ± 2.07 26.90 ± 0.75 95.33 ± 0.58 50.73 ± 0.46 79.14 ± 22.90 1.00 / 0.68 50 full (F) 16 F 94.06 ± 3.54 85.67 ± 1.15 98.67 ± 0.58 90.35 ± 1.37 89.90 ± 1.91 70.32 ± 0.66 47.62 ± 7.28 26.88 ± 3.96 92.33 ± 1.53 43.68 ± 0.24 73.95 ± 24.73 1.00/0.98 32 F 97.00 ± 0.00 85.67 ± 1.53 99.00 ± 0.00 93.67 ± 0.00 92.22 ± 0.69 71.88 ± 0.30 71.01 ± 1.02 29.07 ± 0.65 95.67 ± 1.53 44.97 ± 0.41 78.02 ± 23.18 0.99/0.95 64 F 96.67 ± 0.58 91.00 ± 2.00 99.00 ± 0.00 93.56 ± 0.19 93.22 ± 0.51 73.16 ± 0.41 76.28 ± 0.51 29.67 ± 0.12 95.33 ± 0.58 49.31 ± 1.00 79.72 ± 22.50 0.97/0.89 128 F 97.00 ± 0.00 91.00 ± 1.00 99.00 ± 0.00 93.33 ± 0.00 94.11 ± 0.51 73.51 ± 0.23 73.17 ± 0.58 27.53 ± 1.12 95.00 ± 1.00 50.56 ± 0.06 79.42 ± 22.93 0.88/0.72 256 F 95.00 ± 0.00 88.00 ± 0.00 99.00 ± 0.00 93.67 ± 0.00 94.44 ± 0.19 74.25 ± 0.21 74.97 ± 0.58 26.79 ± 0.09 96.00 ± 0.00 50.86 ± 0.19 79.30 ± 22.82 0.50/0.18 100 diagonal (D) 16 D 76.43 ± 7.07 76.67 ± 4.93 91.61 ± 2.75 89.99 ± 1.07 47.55 ± 8.56 58.08 ± 0.72 20.77 ± 5.50 13.90 ± 2.79 73.93 ± 3.13 40.74 ± 0.85 58.97 ± 26.83 1.00 / 0.99 32 D 90.10 ± 5.85 84.00 ± 1.00 99.00 ± 0.00 85.52 ± 5.34 75.69 ± 12.75 66.62 ± 4.18 44.66 ± 7.26 20.49 ± 7.07 86.67 ± 1.86 42.01 ± 0.94 69.48 ± 25.14 1.00 / 0.98 64 D 95.56 ± 2.49 86.67 ± 0.58 99.00 ± 0.00 92.24 ± 1.68 90.89 ± 1.17 70.35 ± 0.45 65.62 ± 4.03 29.58 ± 2.02 91.67 ± 2.31 43.64 ± 1.36 76.52 ± 23.02 1.00 / 0.96 128 D 96.00 ± 0.00 87.33 ± 1.15 99.00 ± 0.00 93.89 ± 0.19 93.00 ± 0.58 72.70 ± 0.30 74.34 ± 2.07 29.66 ± 0.54 93.67 ± 0.58 44.82 ± 0.89 78.44 ± 22.87 1.00 / 0.92 256 D 95.00 ± 0.00 91.00 ± 0.00 99.00 ± 0.00 93.56 ± 0.19 93.11 ± 0.19 73.05 ± 0.20 74.52 ± 0.95 29.67 ± 0.67 95.33 ± 0.58 49.42 ± 0.65 79.37 ± 22.38 1.00 / 0.84 100 full (F) 16 F 90.70 ± 1.07 83.00 ± 2.65 96.00 ± 3.00 91.22 ± 2.94 87.94 ± 0.54 68.72 ± 1.05 47.57 ± 2.54 23.75 ± 4.33 82.33 ± 2.08 41.51 ± 0.67 71.27 ± 24.23 1.00/0.99 32 F 95.33 ± 1.53 85.00 ± 1.00 99.00 ± 0.00 93.50 ± 0.22 91.44 ± 0.84 70.94 ± 0.02 63.64 ± 1.98 29.82 ± 0.81 91.67 ± 0.58 43.94 ± 0.18 76.43 ± 23.01 0.99/0.97 64 F 97.00 ± 0.00 85.67 ± 1.53 99.00 ± 0.00 93.78 ± 0.19 92.56 ± 0.19 72.11 ± 0.08 73.29 ± 0.64 29.15 ± 0.24 94.33 ± 1.53 44.97 ± 0.05 78.18 ± 23.03 0.97/0.93 128 F 96.33 ± 0.58 90.33 ± 0.58 99.00 ± 0.00 93.00 ± 0.00 93.89 ± 0.19 73.11 ± 0.36 76.50 ± 1.01 29.45 ± 0.35 96.00 ± 0.00 49.81 ± 0.34 79.74 ± 22.47 0.88/0.80 256 F 96.33 ± 0.58 88.67 ± 0.58 99.00 ± 0.00 93.67 ± 0.00 94.89 ± 0.19 74.40 ± 0.16 72.90 ± 0.12 26.77 ± 0.68 96.00 ± 0.00 50.83 ± 0.09 79.35 ± 23.04 0.50/0.34 100 w/clusters (C) 16 C 5 98.33 ± 0.47 89.00 ± 0.82 99.00 ± 0.00 93.25 ± 0.40 92.89 ± 0.87 72.32 ± 0.36 77.08 ± 1.67 28.26 ± 0.38 96.67 ± 0.47 68.30 ± 15.72 81.51 ± 20.63 1.00/0.95 16 C 7 97.67 ± 0.47 87.00 ± 0.82 99.00 ± 0.00 93.46 ± 0.29 93.11 ± 0.68 72.52 ± 0.43 77.66 ± 1.30 28.51 ± 1.26 95.33 ± 0.47 68.46 ± 14.94 81.27 ± 20.35 1.00/0.93 500 diagonal (D) 16 D 54.44 ± 6.87 47.00 ± 2.83 82.21 ± 3.59 73.38 ± 14.97 80.08 ± 3.71 51.02 ± 5.31 17.49 ± 1.10 11.58 ± 0.21 72.67 ± 6.03 39.65 ± 0.28 53.16 ± 24.97 1.00 / 1.00 32 D 58.08 ± 11.52 47.00 ± 7.07 82.06 ± 1.69 78.62 ± 11.23 85.57 ± 1.48 52.98 ± 3.81 21.73 ± 3.95 12.53 ± 2.26 75.33 ± 4.04 39.78 ± 0.42 55.66 ± 25.48 1.00 / 1.00 64 D 69.21 ± 2.03 54.50 ± 9.19 88.33 ± 4.04 91.11 ± 0.38 88.78 ± 0.38 62.36 ± 3.52 33.36 ± 6.69 13.34 ± 1.86 77.67 ± 2.31 40.42 ± 0.98 62.16 ± 26.05 1.00 / 0.99 128 D 79.77 ± 0.37 79.50 ± 2.12 95.89 ± 2.83 91.89 ± 1.39 88.67 ± 0.00 65.92 ± 1.79 44.98 ± 10.98 14.14 ± 0.19 81.00 ± 5.00 40.34 ± 0.80 67.82 ± 26.35 1.00 / 0.98 256 D 93.83 ± 2.52 85.00 ± 0.00 99.00 ± 0.00 93.78 ± 0.19 90.56 ± 0.38 68.95 ± 1.92 49.39 ± 4.36 22.33 ± 3.78 87.33 ± 2.31 42.15 ± 0.73 72.83 ± 25.93 1.00 / 0.97 500 full (F) 16 F 54.30 ± 1.13 37.00 ± 5.66 77.67 ± 0.58 91.00 ± 0.00 90.56 ± 0.19 62.47 ± 0.79 47.56 ± 0.29 14.18 ± 0.67 79.00 ± 1.00 41.58 ± 0.23 60.31 ± 24.42 1.00/1.00 32 F 75.10 ± 4.92 46.50 ± 3.54 91.67 ± 1.53 91.56 ± 0.19 91.56 ± 0.38 67.37 ± 0.83 51.17 ± 0.81 13.44 ± 0.02 81.67 ± 1.53 41.92 ± 0.42 65.84 ± 25.64 0.99/0.99 64 F 96.94 ± 0.42 82.50 ± 0.71 93.33 ± 0.58 93.89 ± 0.69 90.67 ± 0.00 72.30 ± 0.71 54.63 ± 0.79 14.49 ± 0.27 86.33 ± 0.58 43.16 ± 0.08 72.49 ± 26.64 0.97/0.96 128 F 97.67 ± 0.58 83.50 ± 2.12 98.00 ± 0.00 93.56 ± 0.19 92.00 ± 0.00 71.92 ± 0.19 65.02 ± 0.81 28.49 ± 0.55 93.00 ± 0.00 43.85 ± 0.12 76.47 ± 23.77 0.88/0.86 256 F 98.00 ± 0.00 88.50 ± 0.71 99.00 ± 0.00 93.78 ± 0.19 93.00 ± 0.88 72.45 ± 0.38 73.77 ± 1.21 27.59 ± 0.39 95.33 ± 0.58 43.81 ± 0.17 78.18 ± 24.16 0.50/0.47 500 w/clusters (C) 16 C 7 95.00 86.00 98.00 93.67 91.67 71.19 54.69 20.03 90.00 46.34 74.66 1.00/0.98 16 C 10 96.00 87.00 99.00 93.00 91.33 69.93 53.48 30.09 94.00 44.89 75.87 1.00/0.98 16 C 25 96.00 86.00 99.00 92.71 93.00 72.13 74.59 30.21 95.00 46.66 78.53 1.00/0.95 64 C 5 95.00 84.00 99.00 93.67 92.67 72.32 75.60 27.17 96.00 44.43 77.99 0.97/0.93 64 C 7 98.00 88.00 99.00 94.00 93.33 72.18 75.83 28.14 96.00 47.68 79.22 0.97/0.91 1000 w/clusters (C) 16 C 25 95.00 84.00 99.00 93.67 90.67 72.20 55.04 29.97 97.00 46.86 76.34 1.00/0.97 
+
+Table 8: Absolute In-Distribution ROUGE-L scores for various tasks and methods 26 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Model Type Method Type Tasks Average Para. Saved task039 task190 task280 task290 task391 task442 task620 task1342 task1391 task1598 base 0.26 ± 0.00 0.02 ± 0.00 0.19 ± 0.00 0.42 ± 0.00 0.11 ± 0.00 0.51 ± 0.00 0.11 ± 0.00 0.26 ± 0.00 0.19 ± 0.00 0.80 ± 0.00 0.29 ± 0.22 1.00/1.00 lora 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.00/0.00 TIES 10 0.81 ± 0.00 0.57 ± 0.02 0.45 ± 0.04 0.10 ± 0.01 0.83 ± 0.01 0.52 ± 0.00 0.71 ± 0.01 0.58 ± 0.00 0.82 ± 0.01 0.80 ± 0.00 0.62 ± 0.22 1.00 / 1.00 50 0.59 ± 0.00 0.41 ± 0.00 0.18 ± 0.05 0.03 ± 0.01 0.91 ± 0.01 0.34 ± 0.00 0.67 ± 0.00 0.62 ± 0.00 0.32 ± 0.04 0.78 ± 0.00 0.48 ± 0.27 1.00 / 1.00 100 0.55 ± 0.00 0.40 ± 0.00 0.20 ± 0.05 0.01 ± 0.02 0.88 ± 0.00 0.36 ± 0.00 0.65 ± 0.00 0.57 ± 0.02 0.01 ± 0.00 0.78 ± 0.00 0.44 ± 0.29 1.00 / 1.00 500 0.37 ± 0.00 0.26 ± 0.00 0.01 ± 0.00 0.00 ± 0.00 0.83 ± 0.00 0.31 ± 0.00 0.58 ± 0.00 0.37 ± 0.00 0.01 ± 0.00 0.41 ± 0.00 0.32 ± 0.26 1.00 / 1.00 SVD SVD 2 0.98 ± 0.03 1.07 ± 0.02 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.00 1.01 ± 0.01 1.00 ± 0.10 1.00 ± 0.01 0.99 ± 0.01 1.00 ± 0.04 0.88 / 0.88 SVD 4 0.99 ± 0.04 1.04 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.01 1.00 ± 0.00 0.99 ± 0.01 0.99 ± 0.08 0.99 ± 0.01 1.01 ± 0.00 1.00 ± 0.03 0.75 / 0.75 SVD 8 1.00 ± 0.00 1.02 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.01 ± 0.00 1.00 ± 0.01 1.01 ± 0.01 1.01 ± 0.00 1.00 ± 0.01 0.50 / 0.50 SVD 16 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.00 / 0.00 10 diagonal (D) 16 D 1.02 ± 0.01 1.01 ± 0.01 1.00 ± 0.00 1.00 ± 0.01 0.99 ± 0.00 0.97 ± 0.00 1.03 ± 0.02 1.12 ± 0.03 0.99 ± 0.02 0.99 ± 0.00 1.01 ± 0.04 1.00 / 0.90 32 D 1.01 ± 0.01 1.05 ± 0.01 1.00 ± 0.00 0.99 ± 0.00 1.01 ± 0.01 0.99 ± 0.00 0.97 ± 0.01 1.04 ± 0.03 1.00 ± 0.01 1.01 ± 0.01 1.01 ± 0.02 1.00 / 0.80 64 D 1.00 ± 0.00 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.01 ± 0.01 0.99 ± 0.01 1.01 ± 0.00 1.01 ± 0.00 1.00 ± 0.01 1.00 / 0.60 128 D 1.00 ± 0.00 1.01 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.01 ± 0.01 0.99 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.01 1.00 / 0.20 256 D 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 / -0.60 10 full (F) 16 F 1.02 ± 0.00 1.06 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.99 ± 0.00 1.01 ± 0.02 1.07 ± 0.00 1.01 ± 0.01 1.00 ± 0.00 1.02 ± 0.03 1.00/0.90 32 F 1.02 ± 0.01 1.04 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.00 0.96 ± 0.01 1.00 ± 0.02 1.00 ± 0.01 1.01 ± 0.00 1.00 ± 0.02 0.99/0.79 64 F 1.00 ± 0.00 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.01 ± 0.01 0.98 ± 0.01 1.01 ± 0.00 1.01 ± 0.00 1.00 ± 0.01 0.97/0.57 128 F 1.00 ± 0.00 1.01 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.88/0.07 256 F 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.50/-1.10 50 diagonal (D) 16 D 0.98 ± 0.04 0.98 ± 0.01 1.00 ± 0.00 0.92 ± 0.06 0.85 ± 0.06 0.94 ± 0.02 0.69 ± 0.05 0.88 ± 0.10 0.88 ± 0.07 0.86 ± 0.01 0.90 ± 0.10 1.00 / 0.98 32 D 1.00 ± 0.02 1.02 ± 0.02 1.00 ± 0.00 0.99 ± 0.00 0.96 ± 0.01 0.96 ± 0.02 0.85 ± 0.02 1.00 ± 0.12 0.98 ± 0.01 0.90 ± 0.00 0.97 ± 0.06 1.00 / 0.96 64 D 1.02 ± 0.00 1.05 ± 0.02 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.97 ± 0.01 0.99 ± 0.01 1.09 ± 0.03 1.01 ± 0.01 0.94 ± 0.00 1.01 ± 0.04 1.00 / 0.92 128 D 1.01 ± 0.01 1.08 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.98 ± 0.00 0.98 ± 0.02 1.10 ± 0.03 1.00 ± 0.00 1.01 ± 0.01 1.02 ± 0.04 1.00 / 0.84 256 D 1.01 ± 0.01 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.01 1.00 ± 0.00 0.97 ± 0.03 1.00 ± 0.03 1.00 ± 0.01 1.01 ± 0.00 1.00 ± 0.02 1.00 / 0.68 50 full (F) 16 F 0.99 ± 0.04 1.00 ± 0.01 1.00 ± 0.01 0.96 ± 0.01 0.95 ± 0.02 0.95 ± 0.01 0.65 ± 0.09 1.01 ± 0.15 0.97 ± 0.02 0.88 ± 0.01 0.94 ± 0.11 1.00/0.98 32 F 1.02 ± 0.00 1.00 ± 0.02 1.00 ± 0.00 1.00 ± 0.00 0.98 ± 0.01 0.97 ± 0.00 0.96 ± 0.01 1.09 ± 0.03 1.01 ± 0.02 0.93 ± 0.00 0.99 ± 0.04 0.99/0.95 64 F 1.02 ± 0.01 1.06 ± 0.02 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.98 ± 0.00 1.03 ± 0.01 1.11 ± 0.00 1.00 ± 0.01 0.99 ± 0.01 1.02 ± 0.04 0.97/0.89 128 F 1.02 ± 0.00 1.06 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.01 0.98 ± 0.00 0.98 ± 0.01 1.03 ± 0.04 1.00 ± 0.01 1.01 ± 0.00 1.01 ± 0.02 0.88/0.72 256 F 1.00 ± 0.00 1.02 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.00 1.01 ± 0.01 1.00 ± 0.00 1.01 ± 0.00 1.01 ± 0.00 1.00 ± 0.01 0.50/0.18 100 diagonal (D) 16 D 0.80 ± 0.07 0.89 ± 0.06 0.93 ± 0.03 0.96 ± 0.01 0.51 ± 0.09 0.81 ± 0.02 0.30 ± 0.07 0.54 ± 0.11 0.78 ± 0.03 0.83 ± 0.02 0.73 ± 0.21 1.00 / 0.99 32 D 0.95 ± 0.06 0.98 ± 0.01 1.00 ± 0.00 0.91 ± 0.06 0.80 ± 0.13 0.91 ± 0.05 0.62 ± 0.10 0.78 ± 0.25 0.91 ± 0.02 0.85 ± 0.01 0.87 ± 0.14 1.00 / 0.98 64 D 1.01 ± 0.03 1.01 ± 0.01 1.00 ± 0.00 0.98 ± 0.02 0.96 ± 0.01 0.95 ± 0.01 0.90 ± 0.05 1.11 ± 0.07 0.96 ± 0.02 0.88 ± 0.02 0.98 ± 0.07 1.00 / 0.96 128 D 1.01 ± 0.00 1.02 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.98 ± 0.00 1.00 ± 0.03 1.11 ± 0.02 0.99 ± 0.01 0.92 ± 0.00 1.00 ± 0.05 1.00 / 0.92 256 D 1.00 ± 0.00 1.06 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.00 0.98 ± 0.00 1.00 ± 0.01 1.11 ± 0.03 1.00 ± 0.01 0.99 ± 0.02 1.01 ± 0.04 1.00 / 0.84 100 full (F) 16 F 0.95 ± 0.01 0.97 ± 0.03 0.97 ± 0.03 0.97 ± 0.03 0.93 ± 0.01 0.93 ± 0.01 0.66 ± 0.03 0.90 ± 0.16 0.87 ± 0.02 0.85 ± 0.01 0.90 ± 0.10 1.00/0.99 32 F 1.00 ± 0.02 0.99 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 0.97 ± 0.01 0.96 ± 0.00 0.87 ± 0.03 1.12 ± 0.03 0.96 ± 0.01 0.89 ± 0.00 0.98 ± 0.07 0.99/0.97 64 F 1.02 ± 0.00 1.00 ± 0.02 1.00 ± 0.00 1.00 ± 0.00 0.98 ± 0.00 0.97 ± 0.00 0.99 ± 0.01 1.10 ± 0.01 0.99 ± 0.02 0.93 ± 0.01 1.00 ± 0.04 0.97/0.93 128 F 1.01 ± 0.01 1.05 ± 0.01 1.00 ± 0.00 0.99 ± 0.00 1.00 ± 0.00 0.98 ± 0.00 1.03 ± 0.01 1.10 ± 0.01 1.01 ± 0.00 1.00 ± 0.00 1.02 ± 0.03 0.88/0.80 256 F 1.01 ± 0.01 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.01 ± 0.00 1.00 ± 0.00 0.98 ± 0.00 1.00 ± 0.03 1.01 ± 0.00 1.01 ± 0.00 1.00 ± 0.01 0.50/0.34 100 w/clusters (C) 16 C 5 1.13 ± 0.01 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.97 ± 0.00 1.01 ± 0.02 1.22 ± 0.02 1.05 ± 0.01 1.00 ± 0.05 1.04 ± 0.07 1.00/0.95 16 C 7 1.12 ± 0.01 1.01 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.97 ± 0.00 1.02 ± 0.02 1.22 ± 0.05 1.03 ± 0.01 1.01 ± 0.03 1.04 ± 0.07 1.00/0.93 500 diagonal (D) 16 D 0.57 ± 0.07 0.55 ± 0.03 0.83 ± 0.04 0.78 ± 0.16 0.85 ± 0.04 0.73 ± 0.07 0.24 ± 0.02 0.45 ± 0.01 0.76 ± 0.06 0.81 ± 0.00 0.66 ± 0.20 1.00 / 1.00 32 D 0.61 ± 0.12 0.55 ± 0.08 0.83 ± 0.02 0.84 ± 0.12 0.91 ± 0.02 0.75 ± 0.05 0.30 ± 0.05 0.49 ± 0.07 0.79 ± 0.04 0.82 ± 0.01 0.69 ± 0.20 1.00 / 1.00 64 D 0.73 ± 0.02 0.63 ± 0.11 0.89 ± 0.04 0.97 ± 0.00 0.94 ± 0.00 0.86 ± 0.03 0.46 ± 0.09 0.51 ± 0.07 0.82 ± 0.02 0.83 ± 0.01 0.77 ± 0.18 1.00 / 0.99 128 D 0.84 ± 0.00 0.92 ± 0.02 0.97 ± 0.03 0.98 ± 0.01 0.94 ± 0.00 0.90 ± 0.02 0.62 ± 0.14 0.54 ± 0.01 0.85 ± 0.05 0.83 ± 0.01 0.84 ± 0.15 1.00 / 0.98 256 D 0.99 ± 0.03 0.99 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.96 ± 0.00 0.93 ± 0.02 0.68 ± 0.05 0.85 ± 0.14 0.92 ± 0.02 0.85 ± 0.00 0.92 ± 0.11 1.00 / 0.97 500 full (F) 16 F 0.57 ± 0.01 0.43 ± 0.07 0.78 ± 0.01 0.97 ± 0.00 0.96 ± 0.00 0.86 ± 0.01 0.65 ± 0.00 0.55 ± 0.02 0.83 ± 0.01 0.84 ± 0.00 0.76 ± 0.17 1.00/1.00 32 F 0.79 ± 0.05 0.54 ± 0.04 0.93 ± 0.02 0.98 ± 0.00 0.97 ± 0.00 0.92 ± 0.00 0.70 ± 0.01 0.52 ± 0.00 0.86 ± 0.02 0.85 ± 0.00 0.81 ± 0.16 0.99/0.99 64 F 1.02 ± 0.00 0.96 ± 0.01 0.94 ± 0.01 1.00 ± 0.01 0.96 ± 0.00 0.97 ± 0.01 0.74 ± 0.01 0.55 ± 0.01 0.91 ± 0.01 0.87 ± 0.00 0.89 ± 0.14 0.97/0.96 128 F 1.03 ± 0.01 0.97 ± 0.02 0.99 ± 0.00 1.00 ± 0.00 0.98 ± 0.00 0.97 ± 0.00 0.88 ± 0.01 1.07 ± 0.02 0.98 ± 0.00 0.90 ± 0.00 0.98 ± 0.05 0.88/0.86 256 F 1.03 ± 0.00 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.97 ± 0.00 1.00 ± 0.02 1.04 ± 0.02 1.00 ± 0.01 0.93 ± 0.00 1.00 ± 0.03 0.50/0.47 500 w/clusters (C) 16 C 7 1.09 1.00 0.99 1.00 0.98 0.96 0.72 0.88 0.98 0.93 0.95 1.00/0.98 16 C 10 1.10 1.01 1.00 0.99 0.97 0.94 0.72 1.29 1.02 0.92 1.00 1.00/0.98 16 C 25 1.10 1.00 1.00 0.99 0.99 0.97 0.98 1.30 1.03 0.96 1.03 1.00/0.95 64 C 5 1.09 0.98 1.00 1.00 0.99 0.97 0.99 1.17 1.04 0.93 1.02 0.97/0.93 64 C 7 1.12 1.02 1.00 1.00 1.00 0.97 1.00 1.22 1.04 0.99 1.04 0.97/0.91 1000 w/clusters (C) 16 C 25 1.09 0.98 1.00 1.00 0.97 0.97 0.74 1.29 1.05 0.94 1.00 1.00/0.97 
+
+Table 9: Relative In-Distribution ROUGE-1 scores for various tasks and methods 27 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Model Type Method Type Tasks Average Para. Saved task039 task190 task280 task290 task391 task442 task620 task1342 task1391 task1598 base 24.44 ± 0.00 1.60 ± 0.00 19.13 ± 0.00 39.22 ± 0.00 10.42 ± 0.00 39.88 ± 0.00 8.05 ± 0.00 6.96 ± 0.00 17.82 ± 0.00 55.03 ± 0.00 22.43 ± 16.49 1.00 / 1.00 lora 95.00 ± 0.00 86.00 ± 0.00 99.00 ± 0.00 93.67 ± 0.00 94.33 ± 0.00 78.43 ± 0.00 74.90 ± 0.00 26.87 ± 0.00 95.00 ± 0.00 68.66 ± 0.00 81.14 ± 20.67 0.00/0.00 TIES 10 76.50 ± 0.00 49.00 ± 1.73 44.33 ± 4.04 9.80 ± 0.58 78.56 ± 0.96 40.44 ± 0.00 53.10 ± 0.67 15.48 ± 0.12 77.67 ± 1.15 54.89 ± 0.06 49.98 ± 23.33 1.00 / 1.00 50 55.80 ± 0.00 35.00 ± 0.00 18.00 ± 5.20 2.42 ± 0.50 85.78 ± 0.96 26.75 ± 0.00 49.96 ± 0.00 16.73 ± 0.00 30.00 ± 3.46 53.87 ± 0.02 37.43 ± 23.49 1.00 / 1.00 100 52.43 ± 0.00 34.00 ± 0.00 19.67 ± 4.62 1.09 ± 1.66 83.33 ± 0.00 28.57 ± 0.00 48.89 ± 0.00 15.18 ± 0.42 1.00 ± 0.00 53.44 ± 0.02 33.76 ± 25.22 1.00 / 1.00 500 35.18 ± 0.00 22.00 ± 0.00 1.00 ± 0.00 0.00 ± 0.00 78.00 ± 0.00 24.32 ± 0.00 43.80 ± 0.04 9.96 ± 0.13 1.00 ± 0.00 27.90 ± 0.03 24.40 ± 23.79 1.00 / 1.00 SVD SVD 2 93.15 ± 2.77 92.24 ± 1.85 99.09 ± 0.18 93.44 ± 0.14 93.89 ± 0.35 77.33 ± 0.29 75.40 ± 1.01 26.90 ± 2.68 95.06 ± 1.35 67.71 ± 0.49 81.33 ± 20.85 0.88 / 0.88 SVD 4 94.01 ± 3.60 89.21 ± 0.71 99.05 ± 0.09 93.65 ± 0.03 94.66 ± 0.63 78.42 ± 0.23 74.09 ± 1.12 26.47 ± 2.06 93.98 ± 0.77 69.37 ± 0.21 81.22 ± 20.80 0.75 / 0.75 SVD 8 95.00 ± 0.00 87.40 ± 0.59 99.05 ± 0.09 93.65 ± 0.03 94.36 ± 0.38 78.21 ± 0.03 75.57 ± 0.00 26.88 ± 0.27 95.51 ± 1.09 69.33 ± 0.08 83.02 ± 19.87 0.50 / 0.50 SVD 16 95.00 ± 0.00 86.00 ± 0.00 99.00 ± 0.00 93.67 ± 0.00 94.33 ± 0.00 78.44 ± 0.03 74.73 ± 0.18 26.87 ± 0.00 95.00 ± 0.00 68.62 ± 0.04 80.76 ± 21.05 0.00 / 0.00 10 diagonal (D) 16 D 96.67 ± 0.58 87.00 ± 1.00 99.00 ± 0.00 94.00 ± 0.67 93.11 ± 0.38 76.08 ± 0.17 77.26 ± 1.47 30.15 ± 0.72 94.00 ± 1.73 68.25 ± 0.18 81.55 ± 20.03 1.00 / 0.90 32 D 95.67 ± 0.58 90.00 ± 1.00 99.00 ± 0.00 93.00 ± 0.33 94.89 ± 0.51 77.46 ± 0.24 72.53 ± 1.00 27.98 ± 0.71 94.67 ± 0.58 69.16 ± 0.41 81.44 ± 20.80 1.00 / 0.80 64 D 95.00 ± 0.00 88.33 ± 0.58 99.00 ± 0.00 93.67 ± 0.00 94.78 ± 0.38 78.28 ± 0.07 75.47 ± 0.58 26.53 ± 0.25 96.00 ± 0.00 69.36 ± 0.05 81.64 ± 21.06 1.00 / 0.60 128 D 95.00 ± 0.00 86.67 ± 0.58 99.00 ± 0.00 93.67 ± 0.00 94.33 ± 0.00 78.45 ± 0.16 75.46 ± 0.51 26.64 ± 0.23 95.00 ± 0.00 68.70 ± 0.14 81.29 ± 20.92 1.00 / 0.20 256 D 95.00 ± 0.00 86.00 ± 0.00 99.00 ± 0.00 93.67 ± 0.00 94.33 ± 0.00 78.43 ± 0.00 74.90 ± 0.00 26.87 ± 0.00 95.00 ± 0.00 68.59 ± 0.03 81.18 ± 20.86 1.00 / -0.60 10 full (F) 16 F 97.00 ± 0.00 91.00 ± 1.00 99.00 ± 0.00 93.56 ± 0.19 93.56 ± 0.69 77.64 ± 0.25 75.78 ± 1.25 28.71 ± 0.09 96.00 ± 1.00 68.69 ± 0.08 82.09 ± 20.68 1.00/0.90 32 F 96.67 ± 0.58 89.33 ± 0.58 99.00 ± 0.00 93.22 ± 0.19 94.44 ± 0.19 77.84 ± 0.21 72.24 ± 0.59 26.84 ± 0.50 94.67 ± 0.58 69.55 ± 0.08 81.38 ± 21.11 0.99/0.79 64 F 95.00 ± 0.00 88.67 ± 0.58 99.00 ± 0.00 93.67 ± 0.00 94.56 ± 0.38 78.19 ± 0.08 75.97 ± 0.58 26.43 ± 0.34 96.00 ± 0.00 69.38 ± 0.11 81.69 ± 21.07 0.97/0.57 128 F 95.00 ± 0.00 86.67 ± 0.58 99.00 ± 0.00 93.67 ± 0.00 94.33 ± 0.00 78.46 ± 0.03 74.90 ± 0.00 26.72 ± 0.13 95.00 ± 0.00 68.65 ± 0.03 81.24 ± 20.91 0.88/0.07 256 F 95.00 ± 0.00 86.00 ± 0.00 99.00 ± 0.00 93.67 ± 0.00 94.33 ± 0.00 78.44 ± 0.03 74.79 ± 0.19 26.87 ± 0.00 95.00 ± 0.00 68.64 ± 0.03 81.17 ± 20.86 0.50/-1.10 50 diagonal (D) 16 D 92.76 ± 3.53 84.67 ± 1.15 99.00 ± 0.00 86.17 ± 5.81 79.83 ± 6.08 73.55 ± 1.39 51.72 ± 3.78 23.75 ± 2.66 83.90 ± 6.43 59.05 ± 0.94 73.44 ± 22.08 1.00 / 0.98 32 D 95.33 ± 2.08 87.33 ± 2.08 99.00 ± 0.00 92.60 ± 0.29 90.35 ± 1.00 75.43 ± 1.33 63.84 ± 1.64 26.97 ± 3.21 93.33 ± 1.15 61.94 ± 0.32 78.61 ± 21.60 1.00 / 0.96 64 D 97.00 ± 0.00 90.33 ± 1.53 99.00 ± 0.00 93.78 ± 0.19 93.00 ± 0.58 76.27 ± 0.49 74.39 ± 0.90 29.28 ± 0.81 95.67 ± 0.58 64.84 ± 0.27 81.36 ± 20.83 1.00 / 0.92 128 D 96.33 ± 0.58 92.67 ± 0.58 99.00 ± 0.00 93.56 ± 0.19 93.00 ± 0.58 77.24 ± 0.19 73.76 ± 1.25 29.58 ± 0.93 95.00 ± 0.00 69.04 ± 0.54 81.92 ± 20.44 1.00 / 0.84 256 D 95.67 ± 0.58 88.33 ± 0.58 99.00 ± 0.00 93.56 ± 0.19 94.67 ± 0.67 78.45 ± 0.14 72.86 ± 2.07 27.00 ± 0.77 95.33 ± 0.58 69.61 ± 0.18 81.45 ± 21.00 1.00 / 0.68 50 full (F) 16 F 94.06 ± 3.54 85.67 ± 1.15 98.67 ± 0.58 90.35 ± 1.37 89.97 ± 1.78 74.46 ± 0.58 49.03 ± 7.07 27.14 ± 3.94 92.33 ± 1.53 60.26 ± 1.03 76.19 ± 22.80 1.00/0.98 32 F 97.00 ± 0.00 85.67 ± 1.53 99.00 ± 0.00 93.67 ± 0.00 92.22 ± 0.69 75.86 ± 0.22 71.68 ± 0.65 29.26 ± 0.70 95.67 ± 1.53 63.88 ± 0.10 80.39 ± 20.81 0.99/0.95 64 F 96.67 ± 0.58 91.00 ± 2.00 99.00 ± 0.00 93.56 ± 0.19 93.22 ± 0.51 77.17 ± 0.38 77.11 ± 0.51 29.75 ± 0.03 95.33 ± 0.58 68.13 ± 0.75 82.09 ± 20.33 0.97/0.89 128 F 97.00 ± 0.00 91.00 ± 1.00 99.00 ± 0.00 93.33 ± 0.00 94.11 ± 0.51 77.23 ± 0.17 73.67 ± 0.58 27.62 ± 1.12 95.00 ± 1.00 69.40 ± 0.16 81.74 ± 20.97 0.88/0.72 256 F 95.00 ± 0.00 88.00 ± 0.00 99.00 ± 0.00 93.67 ± 0.00 94.44 ± 0.19 77.97 ± 0.24 75.47 ± 0.58 26.96 ± 0.09 96.00 ± 0.00 69.28 ± 0.05 81.58 ± 20.92 0.50/0.18 100 diagonal (D) 16 D 76.43 ± 7.07 76.67 ± 4.93 91.61 ± 2.75 89.99 ± 1.07 47.89 ± 8.62 63.17 ± 1.31 22.23 ± 5.27 14.46 ± 2.89 73.93 ± 3.13 57.17 ± 1.05 61.35 ± 25.78 1.00 / 0.99 32 D 90.10 ± 5.85 84.00 ± 1.00 99.00 ± 0.00 85.52 ± 5.34 75.88 ± 12.57 71.15 ± 3.61 46.10 ± 7.39 21.04 ± 6.76 86.67 ± 1.86 58.64 ± 1.02 71.81 ± 23.39 1.00 / 0.98 64 D 95.56 ± 2.49 86.67 ± 0.58 99.00 ± 0.00 92.24 ± 1.68 90.89 ± 1.17 74.57 ± 0.50 67.07 ± 3.81 29.78 ± 1.92 91.67 ± 2.31 60.28 ± 1.51 78.77 ± 20.77 1.00 / 0.96 128 D 96.00 ± 0.00 87.33 ± 1.15 99.00 ± 0.00 93.89 ± 0.19 93.00 ± 0.58 76.68 ± 0.18 74.84 ± 2.23 29.79 ± 0.50 93.67 ± 0.58 63.49 ± 0.34 80.77 ± 20.47 1.00 / 0.92 256 D 95.00 ± 0.00 91.00 ± 0.00 99.00 ± 0.00 93.56 ± 0.19 93.11 ± 0.19 76.93 ± 0.23 75.13 ± 0.84 29.75 ± 0.73 95.33 ± 0.58 67.89 ± 1.34 81.67 ± 20.28 1.00 / 0.84 100 full (F) 16 F 90.70 ± 1.07 83.00 ± 2.65 96.00 ± 3.00 91.22 ± 2.94 87.94 ± 0.54 73.07 ± 0.93 49.41 ± 2.04 24.17 ± 4.22 82.33 ± 2.08 58.18 ± 0.44 73.60 ± 22.23 1.00/0.99 32 F 95.33 ± 1.53 85.00 ± 1.00 99.00 ± 0.00 93.50 ± 0.22 91.44 ± 0.84 75.00 ± 0.19 65.09 ± 2.23 30.20 ± 0.81 91.67 ± 0.58 60.92 ± 0.26 78.72 ± 20.72 0.99/0.97 64 F 97.00 ± 0.00 85.67 ± 1.53 99.00 ± 0.00 93.78 ± 0.19 92.56 ± 0.19 76.01 ± 0.13 73.96 ± 0.89 29.46 ± 0.21 94.33 ± 1.53 64.07 ± 0.37 80.58 ± 20.59 0.97/0.93 128 F 96.33 ± 0.58 90.33 ± 0.58 99.00 ± 0.00 93.00 ± 0.00 93.89 ± 0.19 77.04 ± 0.30 77.33 ± 1.01 29.49 ± 0.35 96.00 ± 0.00 68.76 ± 0.25 82.12 ± 20.35 0.88/0.80 256 F 96.33 ± 0.58 88.67 ± 0.58 99.00 ± 0.00 93.67 ± 0.00 94.89 ± 0.19 78.16 ± 0.18 73.40 ± 0.12 26.86 ± 0.68 96.00 ± 0.00 69.47 ± 0.23 81.64 ± 21.15 0.50/0.34 100 w/clusters (C) 16 C 5 98.33 ± 0.47 89.00 ± 0.82 99.00 ± 0.00 93.25 ± 0.40 92.89 ± 0.87 76.33 ± 0.28 78.24 ± 2.26 28.45 ± 0.40 96.67 ± 0.47 75.93 ± 8.31 82.81 ± 20.02 1.00/0.95 16 C 7 97.67 ± 0.47 87.00 ± 0.82 99.00 ± 0.00 93.46 ± 0.29 93.11 ± 0.68 76.55 ± 0.29 79.03 ± 2.05 28.62 ± 1.29 95.33 ± 0.47 76.55 ± 6.91 82.63 ± 19.76 1.00/0.93 500 diagonal (D) 16 D 54.44 ± 6.87 47.00 ± 2.83 82.21 ± 3.59 73.38 ± 14.97 80.13 ± 3.68 57.42 ± 5.29 18.33 ± 1.33 12.19 ± 0.30 72.67 ± 6.03 55.79 ± 0.20 55.64 ± 24.25 1.00 / 1.00 32 D 58.08 ± 11.52 47.00 ± 7.07 82.06 ± 1.69 78.62 ± 11.23 85.57 ± 1.48 59.19 ± 3.70 22.76 ± 3.95 13.15 ± 1.94 75.33 ± 4.04 56.07 ± 0.52 58.16 ± 24.56 1.00 / 1.00 64 D 69.21 ± 2.03 54.50 ± 9.19 88.33 ± 4.04 91.11 ± 0.38 88.78 ± 0.38 67.71 ± 2.59 34.79 ± 6.86 13.80 ± 1.95 77.67 ± 2.31 56.78 ± 0.73 64.61 ± 24.79 1.00 / 0.99 128 D 79.77 ± 0.37 79.50 ± 2.12 95.89 ± 2.83 91.89 ± 1.39 88.67 ± 0.00 70.27 ± 1.73 46.64 ± 10.58 14.63 ± 0.25 81.00 ± 5.00 56.88 ± 0.55 70.20 ± 24.63 1.00 / 0.98 256 D 93.83 ± 2.52 85.00 ± 0.00 99.00 ± 0.00 93.78 ± 0.19 90.56 ± 0.38 73.25 ± 1.86 51.14 ± 3.86 22.93 ± 3.86 87.33 ± 2.31 58.48 ± 0.20 75.20 ± 23.90 1.00 / 0.97 500 full (F) 16 F 54.30 ± 1.13 37.00 ± 5.66 77.67 ± 0.58 91.00 ± 0.00 90.56 ± 0.19 67.63 ± 0.45 48.81 ± 0.35 14.70 ± 0.65 79.00 ± 1.00 57.66 ± 0.19 62.69 ± 23.46 1.00/1.00 32 F 75.10 ± 4.92 46.50 ± 3.54 91.67 ± 1.53 91.56 ± 0.19 91.56 ± 0.38 72.03 ± 0.15 52.63 ± 0.86 13.93 ± 0.02 81.67 ± 1.53 58.50 ± 0.20 68.24 ± 24.29 0.99/0.99 64 F 96.94 ± 0.42 82.50 ± 0.71 93.33 ± 0.58 93.89 ± 0.69 90.67 ± 0.00 75.99 ± 0.64 55.63 ± 1.07 14.74 ± 0.27 86.33 ± 0.58 59.43 ± 0.05 74.69 ± 25.01 0.97/0.96 128 F 97.67 ± 0.58 83.50 ± 2.12 98.00 ± 0.00 93.56 ± 0.19 92.00 ± 0.00 75.80 ± 0.16 66.19 ± 0.81 28.67 ± 0.49 93.00 ± 0.00 61.53 ± 0.13 78.84 ± 21.50 0.88/0.86 256 F 98.00 ± 0.00 88.50 ± 0.71 99.00 ± 0.00 93.78 ± 0.19 93.00 ± 0.88 76.33 ± 0.29 74.60 ± 1.21 27.82 ± 0.42 95.33 ± 0.58 63.70 ± 0.14 80.75 ± 21.60 0.50/0.47 500 w/clusters (C) 16 C 7 95.00 86.00 98.00 93.67 91.67 75.10 55.52 20.50 90.00 63.57 76.90 1.00/0.98 16 C 10 96.00 87.00 99.00 93.00 91.33 74.17 55.14 30.29 94.00 63.09 78.30 1.00/0.98 16 C 25 96.00 86.00 99.00 92.71 93.00 76.42 75.42 30.40 95.00 66.07 81.00 1.00/0.95 64 C 5 95.00 84.00 99.00 93.67 92.67 76.45 76.43 27.49 96.00 64.10 80.48 0.97/0.93 64 C 7 98.00 88.00 99.00 94.00 93.33 76.42 76.67 28.48 96.00 68.00 81.79 0.97/0.91 1000 w/clusters (C) 16 C 25 95.00 84.00 99.00 93.67 90.67 76.43 56.71 30.20 97.00 64.61 78.73 1.00/0.97 
+
+Table 10: Absolute In-Distribution ROUGE-1 scores for various tasks and methods 28 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Model Type Method Type Tasks Average Para. Saved task039 task190 task280 task290 task391 task442 task620 task1342 task1391 task1598 base 0.00 ± 0.00 0.00 ± 0.00 0.02 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.01 1.00 / 1.00 lora 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.00 / 0.00 TIES 10 0.69 ± 0.00 0.57 ± 0.02 0.45 ± 0.04 0.10 ± 0.01 0.57 ± 0.03 0.00 ± 0.00 0.39 ± 0.01 0.21 ± 0.00 0.82 ± 0.01 0.00 ± 0.00 0.38 ± 0.28 1.00 / 1.00 50 0.45 ± 0.00 0.41 ± 0.00 0.18 ± 0.05 0.03 ± 0.01 0.70 ± 0.02 0.00 ± 0.00 0.36 ± 0.00 0.21 ± 0.00 0.32 ± 0.04 0.00 ± 0.00 0.27 ± 0.22 1.00 / 1.00 100 0.41 ± 0.00 0.40 ± 0.00 0.20 ± 0.05 0.01 ± 0.02 0.65 ± 0.00 0.00 ± 0.00 0.36 ± 0.00 0.21 ± 0.00 0.01 ± 0.00 0.00 ± 0.00 0.23 ± 0.22 1.00 / 1.00 500 0.22 ± 0.00 0.26 ± 0.00 0.01 ± 0.00 0.00 ± 0.00 0.60 ± 0.00 0.00 ± 0.00 0.32 ± 0.00 0.07 ± 0.00 0.01 ± 0.00 0.00 ± 0.00 0.15 ± 0.20 1.00 / 1.00 SVD SVD 2 0.98 ± 0.03 1.07 ± 0.02 1.00 ± 0.00 0.99 ± 0.01 0.98 ± 0.01 0.98 ± 0.03 0.94 ± 0.01 1.03 ± 0.17 1.00 ± 0.01 0.15 ± 0.29 0.91 ± 0.28 0.88 / 0.88 SVD 4 0.99 ± 0.04 1.04 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.01 ± 0.02 1.11 ± 0.00 0.97 ± 0.02 0.99 ± 0.13 0.99 ± 0.01 0.90 ± 0.17 1.00 ± 0.08 0.75 / 0.75 SVD 8 1.00 ± 0.00 1.02 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.01 1.02 ± 0.05 1.00 ± 0.00 1.00 ± 0.00 1.01 ± 0.01 1.00 ± 0.00 1.00 ± 0.02 0.50 / 0.50 SVD 16 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.00 / 0.00 10 diagonal (D) 16 D 1.02 ± 0.01 1.01 ± 0.01 1.00 ± 0.00 1.01 ± 0.02 0.96 ± 0.01 1.11 ± 0.11 0.89 ± 0.03 1.19 ± 0.04 0.99 ± 0.02 0.33 ± 0.58 0.95 ± 0.27 1.00 / 0.90 32 D 1.01 ± 0.01 1.05 ± 0.01 1.00 ± 0.00 0.98 ± 0.01 1.02 ± 0.02 1.11 ± 0.00 0.93 ± 0.01 1.10 ± 0.04 1.00 ± 0.01 0.67 ± 0.58 0.98 ± 0.19 1.00 / 0.80 64 D 1.00 ± 0.00 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.02 ± 0.01 1.11 ± 0.00 0.99 ± 0.01 1.00 ± 0.00 1.01 ± 0.00 0.67 ± 0.58 0.98 ± 0.19 1.00 / 0.60 128 D 1.00 ± 0.00 1.01 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 / 0.20 256 D 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 / -0.60 10 full (F) 16 F 1.02 ± 0.00 1.06 ± 0.01 1.00 ± 0.00 1.00 ± 0.01 0.97 ± 0.03 1.15 ± 0.06 0.92 ± 0.02 1.17 ± 0.04 1.01 ± 0.01 0.67 ± 0.58 1.00 ± 0.20 1.00/0.90 32 F 1.02 ± 0.01 1.04 ± 0.01 1.00 ± 0.00 0.98 ± 0.01 1.00 ± 0.01 1.11 ± 0.00 0.92 ± 0.01 1.02 ± 0.04 1.00 ± 0.01 1.00 ± 0.00 1.01 ± 0.05 0.99/0.79 64 F 1.00 ± 0.00 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.01 ± 0.01 1.07 ± 0.06 1.01 ± 0.01 1.00 ± 0.00 1.01 ± 0.00 1.00 ± 0.00 1.01 ± 0.03 0.97/0.57 128 F 1.00 ± 0.00 1.01 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.88/0.07 256 F 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.50/-1.10 50 diagonal (D) 16 D 0.91 ± 0.06 0.98 ± 0.01 1.00 ± 0.00 0.91 ± 0.09 0.78 ± 0.05 0.89 ± 0.29 0.34 ± 0.06 0.50 ± 0.45 0.86 ± 0.07 0.00 ± 0.00 0.72 ± 0.35 1.00 / 0.98 32 D 1.00 ± 0.02 1.02 ± 0.02 1.00 ± 0.00 1.00 ± 0.01 0.90 ± 0.03 0.85 ± 0.42 0.56 ± 0.04 0.98 ± 0.23 0.98 ± 0.01 0.00 ± 0.00 0.83 ± 0.34 1.00 / 0.96 64 D 1.02 ± 0.00 1.05 ± 0.02 1.00 ± 0.00 1.00 ± 0.01 0.95 ± 0.02 1.15 ± 0.17 0.81 ± 0.03 1.14 ± 0.00 1.01 ± 0.01 0.00 ± 0.00 0.91 ± 0.33 1.00 / 0.92 128 D 1.01 ± 0.01 1.08 ± 0.01 1.00 ± 0.00 1.00 ± 0.01 0.95 ± 0.02 1.04 ± 0.06 0.92 ± 0.03 1.21 ± 0.07 1.00 ± 0.00 0.67 ± 0.58 0.99 ± 0.20 1.00 / 0.84 256 D 1.01 ± 0.01 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.01 1.01 ± 0.02 1.11 ± 0.00 0.95 ± 0.04 1.02 ± 0.04 1.00 ± 0.01 1.00 ± 0.00 1.01 ± 0.04 1.00 / 0.68 50 full (F) 16 F 0.96 ± 0.05 1.00 ± 0.01 1.00 ± 0.01 0.95 ± 0.04 0.87 ± 0.01 1.04 ± 0.06 0.31 ± 0.08 0.98 ± 0.23 0.97 ± 0.02 0.00 ± 0.00 0.81 ± 0.35 1.00/0.98 32 F 1.02 ± 0.00 1.00 ± 0.02 1.00 ± 0.00 1.00 ± 0.00 0.92 ± 0.03 1.15 ± 0.06 0.73 ± 0.04 1.17 ± 0.04 1.01 ± 0.02 0.00 ± 0.00 0.90 ± 0.33 0.99/0.95 64 F 1.02 ± 0.01 1.06 ± 0.02 1.00 ± 0.00 1.00 ± 0.01 0.96 ± 0.02 1.22 ± 0.00 0.94 ± 0.01 1.17 ± 0.04 1.00 ± 0.01 0.00 ± 0.00 0.94 ± 0.33 0.97/0.89 128 F 1.02 ± 0.00 1.06 ± 0.01 1.00 ± 0.00 0.99 ± 0.00 0.99 ± 0.02 1.15 ± 0.06 0.92 ± 0.01 1.10 ± 0.08 1.00 ± 0.01 1.00 ± 0.00 1.02 ± 0.07 0.88/0.72 256 F 1.00 ± 0.00 1.02 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 1.00 ± 0.01 1.04 ± 0.06 0.99 ± 0.00 1.00 ± 0.00 1.01 ± 0.00 1.00 ± 0.00 1.01 ± 0.02 0.50/0.18 100 diagonal (D) 16 D 0.54 ± 0.16 0.89 ± 0.06 0.90 ± 0.04 0.89 ± 0.05 0.42 ± 0.08 0.44 ± 0.00 0.08 ± 0.02 0.00 ± 0.00 0.76 ± 0.05 0.00 ± 0.00 0.49 ± 0.36 1.00 / 0.99 32 D 0.85 ± 0.15 0.98 ± 0.01 1.00 ± 0.00 0.86 ± 0.13 0.70 ± 0.14 0.74 ± 0.28 0.28 ± 0.07 0.48 ± 0.55 0.91 ± 0.02 0.00 ± 0.00 0.68 ± 0.36 1.00 / 0.98 64 D 1.00 ± 0.04 1.01 ± 0.01 1.00 ± 0.00 0.98 ± 0.02 0.88 ± 0.04 1.07 ± 0.06 0.58 ± 0.09 1.10 ± 0.04 0.96 ± 0.02 0.00 ± 0.00 0.86 ± 0.32 1.00 / 0.96 128 D 1.01 ± 0.00 1.02 ± 0.01 1.00 ± 0.00 1.01 ± 0.01 0.95 ± 0.02 1.11 ± 0.00 0.81 ± 0.06 1.21 ± 0.00 0.99 ± 0.01 0.00 ± 0.00 0.91 ± 0.33 1.00 / 0.92 256 D 1.00 ± 0.00 1.06 ± 0.00 1.00 ± 0.00 1.00 ± 0.01 0.96 ± 0.01 1.11 ± 0.11 0.92 ± 0.02 1.21 ± 0.07 1.00 ± 0.01 0.00 ± 0.00 0.93 ± 0.33 1.00 / 0.84 100 full (F) 16 F 0.85 ± 0.03 0.97 ± 0.03 0.97 ± 0.03 0.95 ± 0.06 0.80 ± 0.02 0.81 ± 0.17 0.29 ± 0.04 0.60 ± 0.34 0.87 ± 0.02 0.00 ± 0.00 0.71 ± 0.33 1.00/0.99 32 F 0.99 ± 0.02 0.99 ± 0.01 1.00 ± 0.00 1.00 ± 0.01 0.90 ± 0.03 1.04 ± 0.06 0.55 ± 0.04 1.07 ± 0.07 0.96 ± 0.01 0.00 ± 0.00 0.85 ± 0.32 0.99/0.97 64 F 1.02 ± 0.00 1.00 ± 0.02 1.00 ± 0.00 1.00 ± 0.01 0.94 ± 0.01 1.04 ± 0.06 0.78 ± 0.01 1.14 ± 0.00 0.99 ± 0.02 0.00 ± 0.00 0.89 ± 0.31 0.97/0.93 128 F 1.01 ± 0.01 1.05 ± 0.01 1.00 ± 0.00 0.98 ± 0.00 0.98 ± 0.01 1.15 ± 0.06 0.94 ± 0.01 1.21 ± 0.00 1.01 ± 0.00 0.33 ± 0.58 0.97 ± 0.28 0.88/0.80 256 F 1.01 ± 0.01 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 1.02 ± 0.01 1.19 ± 0.06 0.93 ± 0.01 1.02 ± 0.04 1.01 ± 0.00 1.00 ± 0.00 1.02 ± 0.06 0.50/0.34 100 w/clusters (C) 16 C 5 1.13 ± 0.01 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.01 0.97 ± 0.03 1.24 ± 0.09 0.88 ± 0.06 1.42 ± 0.07 1.05 ± 0.01 0.65 ± 0.46 1.04 ± 0.19 1.00/0.95 16 C 7 1.12 ± 0.01 1.01 ± 0.01 1.00 ± 0.00 1.00 ± 0.00 0.98 ± 0.03 1.16 ± 0.11 0.92 ± 0.05 1.45 ± 0.04 1.03 ± 0.01 0.69 ± 0.49 1.04 ± 0.18 1.00/0.93 500 diagonal (D) 16 D 0.22 ± 0.10 0.55 ± 0.03 0.81 ± 0.05 0.33 ± 0.49 0.70 ± 0.03 0.15 ± 0.17 0.03 ± 0.01 0.00 ± 0.00 0.76 ± 0.06 0.00 ± 0.00 0.35 ± 0.35 1.00 / 1.00 32 D 0.27 ± 0.18 0.55 ± 0.08 0.82 ± 0.02 0.49 ± 0.37 0.75 ± 0.01 0.22 ± 0.11 0.05 ± 0.05 0.02 ± 0.04 0.79 ± 0.04 0.00 ± 0.00 0.39 ± 0.34 1.00 / 1.00 64 D 0.40 ± 0.04 0.63 ± 0.11 0.89 ± 0.04 0.91 ± 0.01 0.80 ± 0.01 0.48 ± 0.06 0.13 ± 0.04 0.05 ± 0.08 0.82 ± 0.02 0.00 ± 0.00 0.51 ± 0.35 1.00 / 0.99 128 D 0.61 ± 0.04 0.92 ± 0.02 0.97 ± 0.03 0.93 ± 0.05 0.80 ± 0.00 0.74 ± 0.17 0.22 ± 0.11 0.12 ± 0.08 0.85 ± 0.05 0.00 ± 0.00 0.61 ± 0.36 1.00 / 0.98 256 D 0.95 ± 0.02 0.99 ± 0.00 1.00 ± 0.00 1.00 ± 0.01 0.86 ± 0.01 0.85 ± 0.28 0.28 ± 0.06 0.55 ± 0.39 0.92 ± 0.02 0.00 ± 0.00 0.73 ± 0.36 1.00 / 0.97 500 full (F) 16 F 0.21 ± 0.02 0.43 ± 0.07 0.78 ± 0.01 0.90 ± 0.00 0.86 ± 0.01 0.59 ± 0.06 0.21 ± 0.01 0.12 ± 0.04 0.83 ± 0.01 0.00 ± 0.00 0.50 ± 0.34 1.00/1.00 32 F 0.54 ± 0.08 0.54 ± 0.04 0.93 ± 0.02 0.92 ± 0.01 0.90 ± 0.01 0.63 ± 0.13 0.26 ± 0.02 0.14 ± 0.00 0.86 ± 0.02 0.00 ± 0.00 0.57 ± 0.34 0.99/0.99 64 F 0.99 ± 0.03 0.96 ± 0.01 0.94 ± 0.01 1.01 ± 0.03 0.87 ± 0.00 1.04 ± 0.17 0.36 ± 0.00 0.14 ± 0.00 0.91 ± 0.01 0.00 ± 0.00 0.71 ± 0.39 0.97/0.96 128 F 1.02 ± 0.01 0.97 ± 0.02 0.99 ± 0.00 1.00 ± 0.01 0.92 ± 0.00 1.15 ± 0.06 0.61 ± 0.01 1.07 ± 0.00 0.98 ± 0.00 0.00 ± 0.00 0.87 ± 0.33 0.88/0.86 256 F 1.03 ± 0.00 1.03 ± 0.01 1.00 ± 0.00 1.00 ± 0.01 0.95 ± 0.03 1.00 ± 0.00 0.78 ± 0.01 1.07 ± 0.00 1.00 ± 0.01 0.00 ± 0.00 0.88 ± 0.31 0.50/0.47 500 w/clusters (C) 16 C 7 1.08 1.00 0.99 1.00 0.92 1.01 0.39 0.62 0.98 0.00 0.80 1.00/0.98 16 C 10 1.10 1.01 1.00 0.98 0.91 1.01 0.37 1.51 1.02 0.00 0.89 1.00/0.98 16 C 25 1.10 1.00 1.00 0.99 0.97 1.12 0.81 1.42 1.03 0.00 0.95 1.00/0.95 64 C 5 1.09 0.98 1.00 1.00 0.96 1.12 0.83 1.33 1.04 0.00 0.94 0.97/0.93 64 C 7 1.13 1.02 1.00 1.01 0.98 1.12 0.90 1.42 1.04 0.00 0.96 0.97/0.91 1000 w/clusters (C) 16 C 25 1.09 0.98 1.00 1.00 0.89 1.01 0.39 1.42 1.05 0.00 0.88 1.00/0.97 
+
+Table 11: Relative In-Distribution exact match scores for various tasks and methods 29 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Model Type Method Type Tasks Average Para. Saved task039 task190 task280 task290 task391 task442 task620 task1342 task1391 task1598 base 8.59 ± 0.08 9.15 ± 0.00 2.55 ± 0.00 2.88 ± 0.00 2.34 ± 0.00 3.46 ± 0.04 6.40 ± 0.18 5.55 ± 0.00 8.60 ± 0.00 2.67 ± 0.00 5.19 ± 2.65 1.00 / 1.00 lora 0.36 ± 0.01 0.17 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.11 ± 0.00 0.76 ± 0.02 1.17 ± 0.07 1.94 ± 0.00 0.16 ± 0.00 0.85 ± 0.00 0.57 ± 0.59 0.00 / 0.00 SVD SVD 2 0.32 ± 0.01 0.15 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.10 ± 0.00 0.76 ± 0.02 1.13 ± 0.08 1.94 ± 0.00 0.13 ± 0.00 0.97 ± 0.00 0.57 ± 0.60 0.88 / 0.88 SVD 4 0.33 ± 0.01 0.16 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.11 ± 0.00 0.76 ± 0.02 1.14 ± 0.08 1.94 ± 0.00 0.14 ± 0.00 0.86 ± 0.00 0.56 ± 0.59 0.75 / 0.75 SVD 8 0.35 ± 0.01 0.17 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.11 ± 0.00 0.77 ± 0.02 1.16 ± 0.07 1.94 ± 0.00 0.15 ± 0.00 0.84 ± 0.00 0.51 ± 0.58 0.50 / 0.50 SVD 16 0.36 ± 0.01 0.17 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.11 ± 0.00 0.76 ± 0.02 1.14 ± 0.06 1.94 ± 0.00 0.16 ± 0.00 0.85 ± 0.00 0.56 ± 0.59 0.00 / 0.00 10 diagonal (D) 16 D 0.33 ± 0.01 0.15 ± 0.01 0.01 ± 0.00 0.12 ± 0.00 0.10 ± 0.00 0.76 ± 0.03 1.13 ± 0.08 1.95 ± 0.01 0.14 ± 0.00 1.00 ± 0.02 0.57 ± 0.61 1.00 / 0.90 32 D 0.33 ± 0.01 0.16 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.10 ± 0.00 0.75 ± 0.02 1.11 ± 0.07 1.93 ± 0.00 0.14 ± 0.01 0.88 ± 0.00 0.55 ± 0.60 1.00 / 0.80 64 D 0.35 ± 0.01 0.17 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.11 ± 0.00 0.75 ± 0.02 1.11 ± 0.07 1.94 ± 0.00 0.15 ± 0.00 0.84 ± 0.00 0.55 ± 0.59 1.00 / 0.60 128 D 0.35 ± 0.01 0.17 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.11 ± 0.00 0.75 ± 0.02 1.11 ± 0.07 1.94 ± 0.00 0.16 ± 0.00 0.84 ± 0.00 0.56 ± 0.59 1.00 / 0.20 256 D 0.36 ± 0.01 0.17 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.11 ± 0.00 0.75 ± 0.02 1.12 ± 0.07 1.94 ± 0.00 0.16 ± 0.00 0.85 ± 0.00 0.56 ± 0.59 1.00 / -0.60 10 full (F) 16 F 0.33 ± 0.00 0.15 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.10 ± 0.00 0.76 ± 0.02 1.20 ± 0.02 1.95 ± 0.00 0.13 ± 0.00 0.97 ± 0.00 0.57 ± 0.61 1.00/0.90 32 F 0.33 ± 0.01 0.16 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.10 ± 0.00 0.75 ± 0.02 1.11 ± 0.07 1.94 ± 0.00 0.14 ± 0.00 0.86 ± 0.00 0.55 ± 0.60 0.99/0.79 64 F 0.34 ± 0.01 0.16 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.11 ± 0.00 0.75 ± 0.02 1.11 ± 0.07 1.94 ± 0.00 0.15 ± 0.00 0.84 ± 0.00 0.55 ± 0.59 0.97/0.57 128 F 0.35 ± 0.01 0.17 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.11 ± 0.00 0.75 ± 0.02 1.12 ± 0.07 1.94 ± 0.00 0.16 ± 0.00 0.84 ± 0.00 0.56 ± 0.59 0.88/0.07 256 F 0.36 ± 0.01 0.17 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.11 ± 0.00 0.75 ± 0.02 1.12 ± 0.07 1.94 ± 0.00 0.16 ± 0.00 0.85 ± 0.00 0.56 ± 0.59 0.50/-1.10 50 diagonal (D) 16 D 0.61 ± 0.06 0.19 ± 0.02 0.03 ± 0.01 0.29 ± 0.04 0.36 ± 0.04 0.95 ± 0.05 1.73 ± 0.21 2.66 ± 0.22 0.32 ± 0.11 1.98 ± 0.01 0.91 ± 0.88 1.00 / 0.98 32 D 0.37 ± 0.02 0.16 ± 0.00 0.01 ± 0.00 0.19 ± 0.03 0.18 ± 0.01 0.85 ± 0.05 1.37 ± 0.14 2.12 ± 0.05 0.16 ± 0.00 1.65 ± 0.03 0.71 ± 0.73 1.00 / 0.96 64 D 0.33 ± 0.02 0.15 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.10 ± 0.00 0.79 ± 0.02 1.12 ± 0.08 1.97 ± 0.01 0.13 ± 0.01 1.13 ± 0.03 0.59 ± 0.63 1.00 / 0.92 128 D 0.33 ± 0.01 0.15 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.10 ± 0.00 0.76 ± 0.03 1.10 ± 0.05 1.93 ± 0.01 0.14 ± 0.00 0.93 ± 0.01 0.56 ± 0.60 1.00 / 0.84 256 D 0.34 ± 0.01 0.16 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.10 ± 0.00 0.76 ± 0.03 1.11 ± 0.05 1.93 ± 0.00 0.15 ± 0.00 0.85 ± 0.00 0.55 ± 0.59 1.00 / 0.68 50 full (F) 16 F 0.47 ± 0.06 0.17 ± 0.00 0.02 ± 0.00 0.20 ± 0.02 0.19 ± 0.04 0.86 ± 0.03 1.71 ± 0.10 2.20 ± 0.04 0.17 ± 0.01 1.84 ± 0.07 0.78 ± 0.80 1.00/0.98 32 F 0.36 ± 0.02 0.16 ± 0.00 0.01 ± 0.00 0.14 ± 0.00 0.11 ± 0.00 0.80 ± 0.03 1.14 ± 0.08 2.00 ± 0.01 0.14 ± 0.00 1.32 ± 0.02 0.62 ± 0.65 0.99/0.95 64 F 0.33 ± 0.01 0.15 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.10 ± 0.00 0.77 ± 0.03 1.10 ± 0.06 1.94 ± 0.00 0.13 ± 0.00 1.02 ± 0.00 0.57 ± 0.61 0.97/0.89 128 F 0.33 ± 0.01 0.16 ± 0.00 0.00 ± 0.00 0.12 ± 0.00 0.10 ± 0.00 0.76 ± 0.03 1.11 ± 0.05 1.93 ± 0.00 0.14 ± 0.00 0.87 ± 0.00 0.55 ± 0.60 0.88/0.72 256 F 0.35 ± 0.01 0.16 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.11 ± 0.00 0.76 ± 0.03 1.11 ± 0.05 1.94 ± 0.00 0.15 ± 0.00 0.84 ± 0.00 0.55 ± 0.59 0.50/0.18 100 diagonal (D) 16 D 1.69 ± 0.49 0.26 ± 0.04 0.18 ± 0.07 0.34 ± 0.02 1.01 ± 0.20 1.45 ± 0.10 3.59 ± 0.25 3.72 ± 0.72 0.44 ± 0.20 2.37 ± 0.09 1.51 ± 1.32 1.00 / 0.99 32 D 0.67 ± 0.24 0.18 ± 0.01 0.06 ± 0.05 0.31 ± 0.06 0.35 ± 0.08 1.04 ± 0.15 1.97 ± 0.13 2.88 ± 0.70 0.22 ± 0.01 2.12 ± 0.07 0.98 ± 0.98 1.00 / 0.98 64 D 0.39 ± 0.06 0.16 ± 0.00 0.01 ± 0.00 0.18 ± 0.02 0.14 ± 0.01 0.86 ± 0.02 1.39 ± 0.07 2.18 ± 0.04 0.17 ± 0.00 1.79 ± 0.02 0.73 ± 0.76 1.00 / 0.96 128 D 0.32 ± 0.00 0.15 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.10 ± 0.00 0.79 ± 0.02 1.19 ± 0.02 2.00 ± 0.01 0.14 ± 0.01 1.24 ± 0.04 0.61 ± 0.65 1.00 / 0.92 256 D 0.32 ± 0.00 0.15 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.10 ± 0.00 0.77 ± 0.02 1.16 ± 0.00 1.94 ± 0.00 0.13 ± 0.00 0.96 ± 0.01 0.56 ± 0.61 1.00 / 0.84 100 full (F) 16 F 0.66 ± 0.07 0.19 ± 0.01 0.03 ± 0.01 0.25 ± 0.02 0.29 ± 0.02 0.99 ± 0.07 2.50 ± 0.51 2.63 ± 0.03 0.24 ± 0.02 2.21 ± 0.08 1.00 ± 1.01 1.00/0.99 32 F 0.40 ± 0.00 0.17 ± 0.00 0.01 ± 0.00 0.15 ± 0.01 0.13 ± 0.01 0.85 ± 0.02 1.53 ± 0.12 2.17 ± 0.06 0.15 ± 0.01 1.93 ± 0.04 0.75 ± 0.80 0.99/0.97 64 F 0.34 ± 0.01 0.15 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.11 ± 0.00 0.79 ± 0.01 1.23 ± 0.07 1.98 ± 0.01 0.15 ± 0.00 1.26 ± 0.01 0.61 ± 0.65 0.97/0.93 128 F 0.32 ± 0.00 0.15 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.10 ± 0.00 0.77 ± 0.02 1.16 ± 0.01 1.94 ± 0.00 0.13 ± 0.00 0.99 ± 0.01 0.57 ± 0.61 0.88/0.80 256 F 0.33 ± 0.00 0.16 ± 0.00 0.00 ± 0.00 0.12 ± 0.00 0.10 ± 0.00 0.76 ± 0.02 1.15 ± 0.01 1.93 ± 0.00 0.14 ± 0.00 0.86 ± 0.00 0.56 ± 0.60 0.50/0.34 100 w/clusters (C) 16 C 5 0.34 ± 0.01 0.15 ± 0.00 0.01 ± 0.00 0.14 ± 0.01 0.11 ± 0.00 0.79 ± 0.02 0.97 ± 0.27 1.97 ± 0.00 0.13 ± 0.00 0.77 ± 0.25 0.54 ± 0.58 1.00/0.95 16 C 7 0.34 ± 0.01 0.15 ± 0.00 0.01 ± 0.00 0.13 ± 0.00 0.10 ± 0.00 0.78 ± 0.02 0.96 ± 0.27 1.96 ± 0.00 0.14 ± 0.00 0.74 ± 0.22 0.53 ± 0.57 1.00/0.93 500 diagonal (D) 16 D 2.95 ± 0.28 0.73 ± 0.29 0.27 ± 0.09 0.67 ± 0.28 0.52 ± 0.07 2.06 ± 0.30 4.85 ± 0.31 3.94 ± 0.42 0.50 ± 0.05 2.50 ± 0.03 1.94 ± 1.59 1.00 / 1.00 32 D 2.33 ± 0.30 0.62 ± 0.17 0.24 ± 0.05 0.50 ± 0.16 0.37 ± 0.07 1.86 ± 0.25 4.73 ± 0.35 3.81 ± 0.59 0.39 ± 0.04 2.46 ± 0.05 1.77 ± 1.57 1.00 / 1.00 64 D 1.67 ± 0.18 0.43 ± 0.16 0.13 ± 0.04 0.29 ± 0.02 0.23 ± 0.02 1.32 ± 0.28 3.99 ± 0.36 3.41 ± 0.28 0.32 ± 0.05 2.35 ± 0.11 1.45 ± 1.39 1.00 / 0.99 128 D 1.12 ± 0.02 0.23 ± 0.00 0.04 ± 0.03 0.21 ± 0.04 0.22 ± 0.03 1.08 ± 0.06 3.05 ± 0.87 3.09 ± 0.37 0.26 ± 0.03 2.31 ± 0.04 1.19 ± 1.21 1.00 / 0.98 256 D 0.54 ± 0.03 0.18 ± 0.01 0.01 ± 0.00 0.16 ± 0.01 0.15 ± 0.01 0.92 ± 0.08 2.42 ± 0.14 2.51 ± 0.13 0.19 ± 0.01 2.09 ± 0.02 0.94 ± 0.99 1.00 / 0.97 500 full (F) 16 F 2.14 ± 0.06 0.70 ± 0.04 0.28 ± 0.00 0.27 ± 0.01 0.21 ± 0.00 1.14 ± 0.04 3.06 ± 0.27 2.71 ± 0.01 0.34 ± 0.01 2.21 ± 0.01 1.33 ± 1.09 1.00/1.00 32 F 1.17 ± 0.07 0.48 ± 0.03 0.08 ± 0.04 0.21 ± 0.01 0.17 ± 0.00 0.99 ± 0.04 2.69 ± 0.10 2.47 ± 0.02 0.25 ± 0.02 2.11 ± 0.04 1.08 ± 0.99 0.99/0.99 64 F 0.51 ± 0.03 0.21 ± 0.00 0.02 ± 0.00 0.17 ± 0.01 0.14 ± 0.00 0.88 ± 0.04 2.19 ± 0.14 2.34 ± 0.03 0.20 ± 0.00 1.97 ± 0.02 0.89 ± 0.91 0.97/0.96 128 F 0.39 ± 0.01 0.16 ± 0.00 0.01 ± 0.00 0.13 ± 0.00 0.11 ± 0.00 0.81 ± 0.03 1.42 ± 0.07 2.03 ± 0.01 0.16 ± 0.00 1.71 ± 0.01 0.71 ± 0.74 0.88/0.86 256 F 0.32 ± 0.01 0.15 ± 0.00 0.01 ± 0.00 0.12 ± 0.00 0.10 ± 0.00 0.77 ± 0.01 1.18 ± 0.04 1.96 ± 0.00 0.14 ± 0.01 1.25 ± 0.00 0.61 ± 0.65 0.50/0.47 500 w/clusters (C) 16 C 7 0.40 0.18 0.01 0.15 0.13 0.90 2.03 2.21 0.16 1.50 0.77 1.00/0.98 16 C 10 0.36 0.16 0.01 0.14 0.13 0.87 2.19 2.04 0.15 1.38 0.74 1.00/0.98 16 C 25 0.32 0.16 0.01 0.13 0.10 0.81 1.28 1.96 0.12 1.07 0.60 1.00/0.95 64 C 5 0.36 0.16 0.01 0.12 0.10 0.80 1.17 1.98 0.14 1.17 0.60 0.97/0.93 64 C 7 0.34 0.15 0.01 0.12 0.10 0.79 1.14 1.96 0.13 1.08 0.58 0.97/0.91 1000 w/clusters (C) 16 C 25 0.37 0.16 0.01 0.13 0.13 0.86 2.12 2.04 0.14 1.35 0.73 1.00/0.97 
+
+Table 12: Absolute In-Distribution test loss for various tasks and methods 30 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Model Type Method Type Tasks Average Para. Saved task039 task190 task280 task290 task391 task442 task620 task1342 task1391 task1598 base 0.00 ± 0.00 0.00 ± 0.00 1.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.10 ± 0.30 1.00 / 1.00 lora 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 0.00 / 0.00 TIES 10 41.00 ± 0.00 53.67 ± 0.58 44.33 ± 4.04 10.33 ± 0.58 46.33 ± 4.04 1.00 ± 0.00 8.00 ± 0.00 8.00 ± 0.00 76.67 ± 1.15 1.00 ± 0.00 29.03 ± 25.69 1.00 / 1.00 50 24.00 ± 0.00 38.67 ± 0.58 17.67 ± 4.62 2.00 ± 0.00 56.33 ± 0.58 1.00 ± 0.00 8.00 ± 0.00 8.00 ± 0.00 29.67 ± 2.89 0.00 ± 0.00 18.53 ± 18.07 1.00 / 1.00 100 22.00 ± 0.00 38.00 ± 0.00 18.67 ± 4.62 1.00 ± 1.73 51.67 ± 4.62 1.00 ± 0.00 8.00 ± 0.00 7.33 ± 0.58 2.00 ± 0.00 0.00 ± 0.00 14.97 ± 17.20 1.00 / 1.00 500 8.00 ± 0.00 25.00 ± 0.00 1.00 ± 0.00 0.00 ± 0.00 59.00 ± 0.00 0.00 ± 0.00 3.00 ± 0.00 6.00 ± 0.00 2.00 ± 0.00 0.00 ± 0.00 9.90 ± 18.12 1.00 / 1.00 SVD SVD 2 88.33 ± 0.65 91.91 ± 0.94 100.00 ± 0.00 97.25 ± 0.45 92.83 ± 0.39 76.50 ± 1.51 66.00 ± 1.41 58.08 ± 1.16 98.67 ± 0.49 5.83 ± 0.94 77.42 ± 27.69 0.88 / 0.88 SVD 4 93.00 ± 0.00 96.64 ± 0.50 100.00 ± 0.00 100.00 ± 0.00 96.75 ± 0.87 88.83 ± 1.53 90.67 ± 1.23 72.17 ± 0.58 98.67 ± 0.49 16.67 ± 1.78 85.24 ± 24.39 0.75 / 0.75 SVD 8 98.89 ± 0.60 98.55 ± 0.52 100.00 ± 0.00 100.00 ± 0.00 99.42 ± 0.51 93.44 ± 0.73 97.22 ± 0.44 82.78 ± 1.64 99.00 ± 0.00 60.00 ± 0.87 93.70 ± 11.59 0.50 / 0.50 SVD 16 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 99.67 ± 0.50 99.50 ± 0.55 99.67 ± 0.50 100.00 ± 0.00 98.11 ± 0.78 99.69 ± 0.68 0.00 / 0.00 10 diagonal (D) 16 D 83.33 ± 1.53 88.33 ± 0.58 100.00 ± 0.00 97.00 ± 2.00 88.33 ± 1.15 57.00 ± 1.00 48.67 ± 3.21 50.67 ± 4.93 97.67 ± 1.53 5.33 ± 1.15 71.63 ± 29.53 1.00 / 0.90 32 D 93.00 ± 1.00 95.33 ± 0.58 100.00 ± 0.00 98.00 ± 1.00 93.67 ± 1.53 80.67 ± 2.31 78.67 ± 1.15 68.00 ± 1.73 98.33 ± 0.58 14.67 ± 2.52 82.03 ± 24.99 1.00 / 0.80 64 D 99.00 ± 0.00 97.00 ± 1.00 100.00 ± 0.00 100.00 ± 0.00 98.00 ± 0.00 90.67 ± 1.53 95.33 ± 1.15 79.67 ± 1.53 99.00 ± 0.00 55.00 ± 4.36 91.37 ± 13.78 1.00 / 0.60 128 D 100.00 ± 0.00 99.33 ± 0.58 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 96.67 ± 1.53 98.33 ± 1.15 95.67 ± 2.31 100.00 ± 0.00 91.67 ± 3.51 98.17 ± 2.94 1.00 / 0.20 256 D 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 99.33 ± 1.15 100.00 ± 0.00 95.00 ± 1.00 99.43 ± 1.57 1.00 / -0.60 10 full (F) 16 F 83.00 ± 2.00 93.00 ± 1.00 100.00 ± 0.00 98.33 ± 0.58 91.67 ± 0.58 64.33 ± 3.21 59.33 ± 1.15 52.67 ± 1.53 98.33 ± 0.58 6.33 ± 1.15 74.70 ± 28.71 1.00/0.90 32 F 91.33 ± 0.58 96.00 ± 1.00 100.00 ± 0.00 98.33 ± 0.58 94.33 ± 0.58 84.00 ± 2.00 83.00 ± 1.73 70.33 ± 1.53 99.00 ± 1.00 22.00 ± 2.65 83.83 ± 22.82 0.99/0.79 64 F 99.00 ± 0.00 97.33 ± 0.58 100.00 ± 0.00 100.00 ± 0.00 99.33 ± 1.15 91.33 ± 1.53 96.33 ± 0.58 81.67 ± 2.31 99.00 ± 0.00 58.33 ± 1.53 92.23 ± 12.76 0.97/0.57 128 F 99.67 ± 0.58 99.33 ± 0.58 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 97.67 ± 1.15 100.00 ± 0.00 95.67 ± 1.15 100.00 ± 0.00 91.00 ± 1.00 98.33 ± 2.89 0.88/0.07 256 F 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 99.67 ± 0.58 99.67 ± 0.58 99.67 ± 0.58 100.00 ± 0.00 98.00 ± 1.00 99.70 ± 0.70 0.50/-1.10 50 diagonal (D) 16 D 52.67 ± 4.51 86.67 ± 3.06 100.00 ± 0.00 85.00 ± 3.46 65.33 ± 3.79 25.33 ± 5.03 10.00 ± 1.00 10.67 ± 10.26 81.00 ± 6.56 0.00 ± 0.00 51.67 ± 36.18 1.00 / 0.98 32 D 69.67 ± 3.21 88.67 ± 1.53 100.00 ± 0.00 95.00 ± 2.00 80.00 ± 3.00 36.67 ± 5.13 17.00 ± 2.65 26.33 ± 5.03 95.00 ± 2.00 0.00 ± 0.00 60.83 ± 36.02 1.00 / 0.96 64 D 79.67 ± 2.52 91.00 ± 1.00 100.00 ± 0.00 97.67 ± 0.58 88.00 ± 1.00 52.00 ± 1.00 36.67 ± 5.69 41.33 ± 1.15 96.00 ± 1.00 0.33 ± 0.58 68.27 ± 32.66 1.00 / 0.92 128 D 90.00 ± 1.00 91.33 ± 0.58 100.00 ± 0.00 98.33 ± 0.58 90.67 ± 2.08 73.67 ± 2.08 63.67 ± 1.53 56.33 ± 0.58 98.00 ± 0.00 7.33 ± 1.15 76.93 ± 27.79 1.00 / 0.84 256 D 94.67 ± 0.58 96.33 ± 0.58 100.00 ± 0.00 99.67 ± 0.58 96.33 ± 1.15 87.33 ± 0.58 87.00 ± 2.65 71.67 ± 1.53 99.67 ± 0.58 31.67 ± 1.15 86.43 ± 20.41 1.00 / 0.68 50 full (F) 16 F 61.67 ± 3.06 89.67 ± 1.15 99.67 ± 0.58 90.67 ± 2.52 78.33 ± 3.51 34.00 ± 1.00 7.00 ± 3.46 25.00 ± 6.24 90.00 ± 1.00 0.00 ± 0.00 57.60 ± 36.59 1.00/0.98 32 F 71.00 ± 1.00 89.00 ± 1.73 100.00 ± 0.00 98.00 ± 0.00 85.00 ± 1.00 47.00 ± 1.73 29.00 ± 3.00 35.00 ± 2.00 98.00 ± 1.00 0.00 ± 0.00 65.20 ± 34.00 0.99/0.95 64 F 81.67 ± 0.58 93.67 ± 1.15 100.00 ± 0.00 98.33 ± 0.58 90.67 ± 2.08 61.67 ± 1.53 54.33 ± 1.53 51.33 ± 1.15 98.33 ± 0.58 3.33 ± 0.58 73.33 ± 29.89 0.97/0.89 128 F 91.00 ± 1.00 94.33 ± 0.58 100.00 ± 0.00 99.00 ± 0.00 93.33 ± 1.53 81.67 ± 0.58 75.00 ± 1.73 67.67 ± 2.08 98.67 ± 0.58 16.67 ± 0.58 81.73 ± 24.46 0.88/0.72 256 F 97.00 ± 0.00 98.00 ± 0.00 100.00 ± 0.00 100.00 ± 0.00 99.67 ± 0.58 92.00 ± 0.00 94.33 ± 1.15 79.67 ± 1.53 99.00 ± 0.00 57.33 ± 2.52 91.70 ± 13.11 0.50/0.18 100 diagonal (D) 16 D 33.00 ± 8.19 79.33 ± 5.69 89.33 ± 5.51 80.00 ± 3.61 35.33 ± 6.03 4.00 ± 1.73 3.00 ± 1.00 0.00 ± 0.00 71.33 ± 4.51 0.00 ± 0.00 39.53 ± 36.15 1.00 / 0.99 32 D 51.00 ± 7.81 90.00 ± 1.00 100.00 ± 0.00 88.00 ± 7.00 58.67 ± 11.68 17.67 ± 10.26 7.67 ± 2.89 9.33 ± 12.86 86.33 ± 2.52 0.00 ± 0.00 50.87 ± 38.43 1.00 / 0.98 64 D 68.00 ± 2.65 87.33 ± 1.53 100.00 ± 0.00 94.33 ± 4.04 80.33 ± 2.08 38.00 ± 3.00 19.67 ± 4.51 28.33 ± 1.53 92.67 ± 1.15 0.33 ± 0.58 60.90 ± 34.91 1.00 / 0.96 128 D 82.00 ± 2.00 90.00 ± 2.00 100.00 ± 0.00 97.33 ± 0.58 85.33 ± 0.58 55.33 ± 2.08 34.33 ± 3.79 36.67 ± 2.52 94.67 ± 0.58 0.00 ± 0.00 67.57 ± 32.95 1.00 / 0.92 256 D 90.00 ± 1.00 93.00 ± 2.00 100.00 ± 0.00 97.67 ± 0.58 91.67 ± 0.58 71.67 ± 5.13 59.67 ± 1.53 58.00 ± 0.00 97.67 ± 0.58 4.00 ± 1.00 76.33 ± 28.88 1.00 / 0.84 100 full (F) 16 F 49.00 ± 2.00 89.67 ± 3.21 97.00 ± 3.00 84.33 ± 3.06 65.33 ± 2.52 20.67 ± 8.33 6.33 ± 2.08 8.33 ± 4.73 81.33 ± 2.08 0.00 ± 0.00 50.20 ± 37.06 1.00/0.99 32 F 65.00 ± 3.46 90.33 ± 1.53 100.00 ± 0.00 96.33 ± 1.53 80.00 ± 2.65 41.33 ± 3.21 16.00 ± 0.00 29.33 ± 2.08 92.00 ± 2.65 0.00 ± 0.00 61.03 ± 35.43 0.99/0.97 64 F 72.33 ± 0.58 89.67 ± 1.53 100.00 ± 0.00 97.67 ± 0.58 86.00 ± 1.00 53.00 ± 1.00 35.33 ± 1.53 38.00 ± 1.73 94.67 ± 0.58 0.00 ± 0.00 66.67 ± 32.54 0.97/0.93 128 F 84.33 ± 1.53 92.33 ± 1.53 100.00 ± 0.00 98.00 ± 0.00 91.33 ± 0.58 68.67 ± 0.58 56.00 ± 1.00 57.67 ± 1.15 99.00 ± 0.00 5.33 ± 0.58 75.27 ± 28.67 0.88/0.80 256 F 91.67 ± 1.15 96.67 ± 0.58 100.00 ± 0.00 100.00 ± 0.00 94.33 ± 0.58 84.67 ± 0.58 78.00 ± 0.00 69.67 ± 0.58 99.00 ± 0.00 22.00 ± 1.00 83.60 ± 23.08 0.50/0.34 100 w/clusters (C) 16 C 5 74.67 ± 0.94 91.00 ± 0.82 100.00 ± 0.00 96.67 ± 1.25 87.67 ± 1.70 53.67 ± 2.05 40.67 ± 2.87 41.00 ± 4.55 97.67 ± 1.25 0.67 ± 0.94 68.37 ± 31.46 1.00/0.95 16 C 7 77.67 ± 0.47 90.33 ± 1.25 100.00 ± 0.00 97.33 ± 0.94 90.33 ± 2.05 58.67 ± 0.94 49.00 ± 2.16 49.00 ± 0.82 97.67 ± 0.47 3.67 ± 1.25 71.37 ± 29.48 1.00/0.93 500 diagonal (D) 16 D 8.00 ± 3.61 51.50 ± 3.54 79.67 ± 4.93 28.00 ± 42.44 56.67 ± 2.89 0.67 ± 1.15 0.33 ± 0.58 0.00 ± 0.00 71.67 ± 6.03 0.00 ± 0.00 28.90 ± 33.54 1.00 / 1.00 32 D 14.33 ± 11.02 52.50 ± 9.19 80.67 ± 2.08 43.00 ± 31.48 60.67 ± 0.58 0.67 ± 1.15 1.67 ± 1.15 0.00 ± 0.00 74.33 ± 4.04 0.00 ± 0.00 32.10 ± 33.43 1.00 / 1.00 64 D 25.67 ± 1.15 62.50 ± 12.02 87.33 ± 4.04 78.33 ± 1.15 65.33 ± 3.06 5.33 ± 3.51 3.67 ± 1.15 1.00 ± 1.73 76.67 ± 2.31 0.00 ± 0.00 39.83 ± 35.80 1.00 / 0.99 128 D 38.33 ± 3.21 85.50 ± 2.12 96.00 ± 3.00 81.33 ± 2.31 65.67 ± 1.15 11.67 ± 4.73 5.33 ± 2.08 2.00 ± 1.00 80.00 ± 5.00 0.00 ± 0.00 45.24 ± 37.78 1.00 / 0.98 256 D 53.33 ± 0.58 91.00 ± 2.83 100.00 ± 0.00 89.00 ± 2.65 76.00 ± 2.00 20.67 ± 6.81 6.00 ± 1.73 12.00 ± 8.00 86.33 ± 2.31 0.00 ± 0.00 52.14 ± 38.64 1.00 / 0.97 500 full (F) 16 F 8.33 ± 2.08 41.00 ± 5.66 76.67 ± 0.58 78.00 ± 0.00 72.67 ± 0.58 6.00 ± 0.00 5.67 ± 0.58 0.00 ± 0.00 78.00 ± 1.00 0.00 ± 0.00 36.48 ± 35.46 1.00/1.00 32 F 33.67 ± 4.16 51.00 ± 1.41 92.67 ± 1.53 77.00 ± 1.73 75.00 ± 2.00 14.33 ± 1.53 8.00 ± 0.00 0.00 ± 0.00 80.67 ± 1.53 0.00 ± 0.00 42.97 ± 35.80 0.99/0.99 64 F 56.00 ± 2.65 85.50 ± 0.71 94.33 ± 0.58 89.33 ± 2.89 74.33 ± 1.15 36.33 ± 1.15 9.00 ± 1.00 2.67 ± 1.15 84.00 ± 1.00 0.00 ± 0.00 52.03 ± 36.92 0.97/0.96 128 F 69.33 ± 0.58 88.50 ± 0.71 99.00 ± 0.00 96.33 ± 1.53 80.33 ± 1.15 45.00 ± 2.00 16.33 ± 0.58 31.00 ± 1.73 92.00 ± 0.00 0.00 ± 0.00 60.86 ± 35.07 0.88/0.86 256 F 79.67 ± 0.58 89.50 ± 0.71 100.00 ± 0.00 97.67 ± 0.58 87.33 ± 0.58 57.00 ± 1.00 35.00 ± 1.00 42.00 ± 1.00 95.00 ± 1.00 0.00 ± 0.00 67.59 ± 32.67 0.50/0.47 500 w/clusters (C) 16 C 7 63.00 90.00 99.00 96.00 78.00 31.00 9.00 15.00 89.00 1.00 57.10 1.00/0.98 16 C 10 69.00 93.00 100.00 98.00 81.00 34.00 8.00 33.00 95.00 1.00 61.20 1.00/0.98 16 C 25 79.00 90.00 100.00 97.00 88.00 53.00 38.00 48.00 98.00 0.00 69.10 1.00/0.95 64 C 5 77.00 88.00 100.00 98.00 89.00 56.00 39.00 42.00 99.00 0.00 68.80 0.97/0.93 64 C 7 76.00 90.00 100.00 97.00 89.00 60.00 48.00 49.00 99.00 3.00 71.10 0.97/0.91 1000 w/clusters (C) 16 C 25 73.00 90.00 100.00 98.00 77.00 39.00 8.00 34.00 96.00 1.00 61.60 1.00/0.97 
+
+Table 13: Absolute In-Distribution agreement for various tasks and methods 31 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Model Type Method Type Tasks Average task039 task190 task280 task290 task391 task442 task620 task1342 task1391 task1598 SVD SVD 2 0.29 ± 0.00 0.43 ± 0.00 0.31 ± 0.00 0.40 ± 0.00 0.38 ± 0.00 0.31 ± 0.00 0.37 ± 0.00 0.31 ± 0.00 0.42 ± 0.00 0.30 ± 0.00 0.35 ± 0.05 
+
+SVD 4 0.16 ± 0.00 0.24 ± 0.00 0.16 ± 0.00 0.25 ± 0.00 0.23 ± 0.00 0.17 ± 0.00 0.22 ± 0.00 0.16 ± 0.00 0.25 ± 0.00 0.16 ± 0.00 0.20 ± 0.04 
+
+SVD 8 0.06 ± 0.00 0.09 ± 0.00 0.06 ± 0.00 0.11 ± 0.00 0.10 ± 0.00 0.07 ± 0.00 0.09 ± 0.00 0.06 ± 0.00 0.11 ± 0.00 0.06 ± 0.00 0.08 ± 0.02 
+
+10 diagonal (D) 16 D 0.37 ± 0.02 0.51 ± 0.02 0.36 ± 0.01 0.57 ± 0.02 0.55 ± 0.00 0.39 ± 0.02 0.49 ± 0.01 0.36 ± 0.02 0.53 ± 0.03 0.39 ± 0.01 0.45 ± 0.08 
+
+32 D 0.21 ± 0.01 0.28 ± 0.00 0.20 ± 0.01 0.35 ± 0.00 0.33 ± 0.01 0.22 ± 0.01 0.31 ± 0.01 0.20 ± 0.01 0.32 ± 0.01 0.22 ± 0.00 0.26 ± 0.06 
+
+64 D 0.10 ± 0.00 0.11 ± 0.01 0.09 ± 0.00 0.18 ± 0.01 0.18 ± 0.00 0.10 ± 0.00 0.15 ± 0.01 0.09 ± 0.00 0.14 ± 0.00 0.09 ± 0.00 0.12 ± 0.04 
+
+128 D 0.02 ± 0.00 0.01 ± 0.00 0.02 ± 0.00 0.03 ± 0.00 0.04 ± 0.00 0.02 ± 0.00 0.03 ± 0.00 0.02 ± 0.00 0.02 ± 0.00 0.02 ± 0.00 0.03 ± 0.01 
+
+256 D 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 
+
+10 full (F) 16 F 0.35 ± 0.00 0.46 ± 0.00 0.34 ± 0.00 0.51 ± 0.00 0.47 ± 0.01 0.36 ± 0.01 0.45 ± 0.01 0.35 ± 0.01 0.49 ± 0.00 0.35 ± 0.01 0.41 ± 0.06 
+
+32 F 0.20 ± 0.00 0.24 ± 0.00 0.20 ± 0.00 0.30 ± 0.00 0.29 ± 0.00 0.22 ± 0.00 0.27 ± 0.00 0.20 ± 0.00 0.27 ± 0.00 0.21 ± 0.00 0.24 ± 0.04 
+
+64 F 0.10 ± 0.00 0.10 ± 0.00 0.09 ± 0.00 0.13 ± 0.00 0.13 ± 0.00 0.10 ± 0.00 0.12 ± 0.00 0.09 ± 0.00 0.12 ± 0.00 0.10 ± 0.00 0.11 ± 0.02 
+
+128 F 0.02 ± 0.00 0.02 ± 0.00 0.02 ± 0.00 0.01 ± 0.00 0.02 ± 0.00 0.02 ± 0.00 0.02 ± 0.00 0.02 ± 0.00 0.01 ± 0.00 0.02 ± 0.00 0.02 ± 0.00 
+
+256 F 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 0.00 ± 0.00 
+
+50 diagonal (D) 16 D 0.66 ± 0.01 0.69 ± 0.01 0.88 ± 0.01 0.76 ± 0.03 0.95 ± 0.02 0.91 ± 0.01 0.83 ± 0.02 0.88 ± 0.03 0.72 ± 0.02 0.88 ± 0.02 0.82 ± 0.10 
+
+32 D 0.50 ± 0.01 0.52 ± 0.02 0.73 ± 0.01 0.58 ± 0.03 0.88 ± 0.03 0.79 ± 0.03 0.72 ± 0.01 0.75 ± 0.01 0.57 ± 0.02 0.75 ± 0.01 0.68 ± 0.12 
+
+64 D 0.34 ± 0.01 0.37 ± 0.01 0.52 ± 0.00 0.38 ± 0.01 0.71 ± 0.02 0.58 ± 0.01 0.54 ± 0.00 0.56 ± 0.00 0.44 ± 0.01 0.58 ± 0.01 0.50 ± 0.11 
+
+128 D 0.21 ± 0.01 0.22 ± 0.01 0.31 ± 0.00 0.22 ± 0.00 0.51 ± 0.01 0.42 ± 0.01 0.38 ± 0.00 0.39 ± 0.00 0.27 ± 0.00 0.40 ± 0.00 0.33 ± 0.10 
+
+256 D 0.10 ± 0.00 0.12 ± 0.00 0.16 ± 0.00 0.10 ± 0.00 0.29 ± 0.01 0.21 ± 0.00 0.19 ± 0.00 0.23 ± 0.01 0.15 ± 0.00 0.20 ± 0.00 0.18 ± 0.06 
+
+50 full (F) 16 F 0.57 ± 0.01 0.60 ± 0.01 0.86 ± 0.01 0.71 ± 0.02 0.95 ± 0.01 0.88 ± 0.01 0.81 ± 0.00 0.83 ± 0.01 0.67 ± 0.01 0.86 ± 0.01 0.78 ± 0.12 
+
+32 F 0.47 ± 0.01 0.48 ± 0.01 0.71 ± 0.00 0.55 ± 0.01 0.78 ± 0.01 0.69 ± 0.01 0.69 ± 0.00 0.65 ± 0.01 0.53 ± 0.01 0.71 ± 0.00 0.63 ± 0.11 
+
+64 F 0.33 ± 0.00 0.35 ± 0.00 0.45 ± 0.00 0.36 ± 0.00 0.56 ± 0.00 0.50 ± 0.01 0.47 ± 0.00 0.49 ± 0.00 0.39 ± 0.01 0.49 ± 0.00 0.44 ± 0.08 
+
+128 F 0.19 ± 0.00 0.21 ± 0.00 0.25 ± 0.00 0.19 ± 0.00 0.35 ± 0.00 0.30 ± 0.00 0.28 ± 0.00 0.31 ± 0.00 0.24 ± 0.00 0.30 ± 0.00 0.26 ± 0.05 
+
+256 F 0.09 ± 0.00 0.10 ± 0.00 0.10 ± 0.00 0.08 ± 0.00 0.16 ± 0.00 0.13 ± 0.00 0.12 ± 0.00 0.15 ± 0.00 0.11 ± 0.00 0.13 ± 0.00 0.12 ± 0.02 
+
+100 diagonal (D) 16 D 0.90 ± 0.01 0.85 ± 0.01 0.87 ± 0.03 0.88 ± 0.02 0.68 ± 0.02 0.91 ± 0.01 0.97 ± 0.01 0.98 ± 0.01 0.96 ± 0.01 1.00 ± 0.00 0.90 ± 0.09 
+
+32 D 0.83 ± 0.02 0.77 ± 0.00 0.77 ± 0.01 0.78 ± 0.00 0.55 ± 0.02 0.79 ± 0.01 0.94 ± 0.02 0.94 ± 0.03 0.87 ± 0.00 0.98 ± 0.01 0.82 ± 0.12 
+
+64 D 0.67 ± 0.01 0.63 ± 0.00 0.59 ± 0.02 0.63 ± 0.01 0.40 ± 0.00 0.62 ± 0.01 0.86 ± 0.02 0.82 ± 0.02 0.71 ± 0.03 0.93 ± 0.00 0.68 ± 0.15 
+
+128 D 0.49 ± 0.01 0.47 ± 0.00 0.42 ± 0.01 0.45 ± 0.00 0.27 ± 0.02 0.44 ± 0.01 0.73 ± 0.01 0.69 ± 0.02 0.59 ± 0.02 0.80 ± 0.02 0.53 ± 0.16 
+
+256 D 0.32 ± 0.00 0.31 ± 0.00 0.26 ± 0.01 0.30 ± 0.00 0.15 ± 0.01 0.28 ± 0.00 0.51 ± 0.02 0.51 ± 0.02 0.40 ± 0.01 0.61 ± 0.01 0.36 ± 0.14 
+
+100 full (F) 16 F 0.88 ± 0.00 0.82 ± 0.00 0.84 ± 0.01 0.86 ± 0.00 0.67 ± 0.01 0.88 ± 0.01 0.99 ± 0.00 0.96 ± 0.01 0.91 ± 0.01 1.00 ± 0.00 0.88 ± 0.09 
+
+32 F 0.78 ± 0.00 0.72 ± 0.00 0.73 ± 0.00 0.74 ± 0.00 0.52 ± 0.00 0.74 ± 0.01 0.94 ± 0.01 0.89 ± 0.00 0.77 ± 0.02 0.99 ± 0.00 0.78 ± 0.13 
+
+64 F 0.60 ± 0.00 0.57 ± 0.00 0.57 ± 0.00 0.57 ± 0.00 0.39 ± 0.00 0.56 ± 0.00 0.76 ± 0.00 0.73 ± 0.00 0.60 ± 0.00 0.83 ± 0.01 0.62 ± 0.12 
+
+128 F 0.40 ± 0.00 0.38 ± 0.00 0.35 ± 0.00 0.37 ± 0.00 0.25 ± 0.00 0.37 ± 0.00 0.52 ± 0.00 0.54 ± 0.00 0.45 ± 0.00 0.60 ± 0.00 0.42 ± 0.10 
+
+256 F 0.21 ± 0.00 0.20 ± 0.00 0.18 ± 0.00 0.19 ± 0.00 0.13 ± 0.00 0.19 ± 0.00 0.30 ± 0.00 0.34 ± 0.00 0.26 ± 0.00 0.38 ± 0.00 0.24 ± 0.08 
+
+100 w/clusters (C) 16 C 5 0.46 ± 0.00 0.46 ± 0.00 0.45 ± 0.00 0.47 ± 0.01 0.61 ± 0.01 0.65 ± 0.01 0.61 ± 0.00 0.64 ± 0.02 0.45 ± 0.00 0.59 ± 0.01 0.54 ± 0.08 
+
+16 C 7 0.41 ± 0.01 0.42 ± 0.01 0.39 ± 0.01 0.43 ± 0.01 0.51 ± 0.01 0.56 ± 0.01 0.53 ± 0.01 0.55 ± 0.00 0.42 ± 0.01 0.54 ± 0.01 0.48 ± 0.06 
+
+500 diagonal (D) 16 D 0.97 ± 0.00 0.73 ± 0.00 0.96 ± 0.00 1.00 ± 0.00 0.99 ± 0.01 0.96 ± 0.01 0.90 ± 0.00 0.92 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.94 ± 0.08 
+
+32 D 0.96 ± 0.00 0.70 ± 0.00 0.92 ± 0.01 0.98 ± 0.01 0.96 ± 0.01 0.93 ± 0.01 0.86 ± 0.00 0.89 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.92 ± 0.09 
+
+64 D 0.90 ± 0.01 0.65 ± 0.00 0.86 ± 0.01 0.96 ± 0.02 0.90 ± 0.01 0.87 ± 0.01 0.81 ± 0.00 0.83 ± 0.01 0.99 ± 0.01 1.00 ± 0.00 0.88 ± 0.10 
+
+128 D 0.82 ± 0.01 0.60 ± 0.00 0.76 ± 0.00 0.90 ± 0.02 0.83 ± 0.01 0.78 ± 0.02 0.74 ± 0.00 0.74 ± 0.01 0.97 ± 0.01 1.00 ± 0.00 0.81 ± 0.12 
+
+256 D 0.59 ± 0.02 0.51 ± 0.00 0.56 ± 0.01 0.81 ± 0.02 0.70 ± 0.02 0.55 ± 0.01 0.57 ± 0.01 0.54 ± 0.01 0.91 ± 0.01 1.00 ± 0.01 0.67 ± 0.17 
+
+500 full (F) 16 F 0.94 ± 0.00 0.67 ± 0.00 0.88 ± 0.00 1.00 ± 0.00 0.98 ± 0.00 0.90 ± 0.00 0.82 ± 0.00 0.83 ± 0.00 1.00 ± 0.00 1.00 ± 0.00 0.90 ± 0.10 
+
+32 F 0.88 ± 0.00 0.61 ± 0.00 0.81 ± 0.00 0.97 ± 0.01 0.94 ± 0.00 0.84 ± 0.00 0.75 ± 0.00 0.77 ± 0.00 0.99 ± 0.00 0.99 ± 0.00 0.86 ± 0.12 
+
+64 F 0.80 ± 0.00 0.55 ± 0.00 0.72 ± 0.00 0.86 ± 0.00 0.82 ± 0.01 0.76 ± 0.00 0.67 ± 0.00 0.70 ± 0.00 0.94 ± 0.00 0.99 ± 0.00 0.78 ± 0.13 
+
+128 F 0.64 ± 0.00 0.46 ± 0.00 0.60 ± 0.00 0.74 ± 0.00 0.65 ± 0.00 0.63 ± 0.00 0.56 ± 0.00 0.58 ± 0.00 0.85 ± 0.00 0.96 ± 0.00 0.67 ± 0.14 
+
+256 F 0.43 ± 0.00 0.35 ± 0.00 0.44 ± 0.00 0.55 ± 0.00 0.49 ± 0.00 0.45 ± 0.00 0.40 ± 0.00 0.42 ± 0.00 0.67 ± 0.00 0.84 ± 0.00 0.50 ± 0.14 
+
+500 w/clusters (C) 16 C 7 0.68 0.70 0.64 0.72 0.85 0.90 0.93 0.92 0.71 0.83 0.79 16 C 10 0.61 0.65 0.61 0.66 0.84 0.86 0.88 0.84 0.62 0.76 0.73 16 C 25 0.42 0.41 0.42 0.44 0.57 0.64 0.63 0.62 0.40 0.58 0.51 64 C 5 0.49 0.49 0.45 0.51 0.64 0.66 0.62 0.67 0.50 0.65 0.57 64 C 7 0.45 0.45 0.41 0.45 0.56 0.58 0.55 0.59 0.44 0.57 0.51 1000 w/clusters (C) 16 C 25 0.58 0.64 0.54 0.64 0.81 0.87 0.90 0.84 0.57 0.74 0.71 
+
+Table 14: Reconstruction error In-Distribution for various tasks and methods 32 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Model Type Method Type Tasks Average task039 task190 task280 task290 task391 task442 task620 task1342 task1391 task1598 10 full (F) 16 F 0.46 ± 0.01 0.63 ± 0.00 0.50 ± 0.00 0.55 ± 0.01 0.50 ± 0.00 0.49 ± 0.01 0.50 ± 0.01 0.50 ± 0.01 0.61 ± 0.01 0.47 ± 0.01 0.52 ± 0.06 
+
+32 F 0.30 ± 0.01 0.37 ± 0.00 0.31 ± 0.00 0.35 ± 0.00 0.34 ± 0.00 0.31 ± 0.00 0.33 ± 0.00 0.31 ± 0.00 0.38 ± 0.00 0.30 ± 0.00 0.33 ± 0.03 
+
+64 F 0.15 ± 0.00 0.15 ± 0.00 0.16 ± 0.00 0.17 ± 0.00 0.17 ± 0.00 0.16 ± 0.00 0.16 ± 0.00 0.16 ± 0.00 0.17 ± 0.00 0.15 ± 0.00 0.16 ± 0.01 
+
+50 full (F) 16 F 0.80 ± 0.02 0.82 ± 0.01 0.85 ± 0.01 0.90 ± 0.02 0.78 ± 0.01 0.95 ± 0.01 0.76 ± 0.01 0.75 ± 0.00 0.79 ± 0.01 0.82 ± 0.01 0.82 ± 0.06 
+
+32 F 0.65 ± 0.01 0.67 ± 0.01 0.72 ± 0.01 0.76 ± 0.02 0.65 ± 0.01 0.82 ± 0.02 0.66 ± 0.01 0.65 ± 0.01 0.67 ± 0.02 0.69 ± 0.00 0.69 ± 0.06 
+
+64 F 0.50 ± 0.01 0.52 ± 0.00 0.52 ± 0.00 0.55 ± 0.01 0.52 ± 0.01 0.62 ± 0.00 0.54 ± 0.01 0.51 ± 0.00 0.54 ± 0.01 0.57 ± 0.00 0.54 ± 0.03 
+
+100 full (F) 16 F 0.93 ± 0.02 0.90 ± 0.02 0.93 ± 0.01 0.91 ± 0.02 0.88 ± 0.03 0.98 ± 0.01 0.96 ± 0.01 0.78 ± 0.00 0.82 ± 0.00 0.93 ± 0.02 0.90 ± 0.06 
+
+32 F 0.87 ± 0.01 0.81 ± 0.01 0.85 ± 0.02 0.80 ± 0.01 0.79 ± 0.02 0.91 ± 0.00 0.90 ± 0.01 0.74 ± 0.01 0.70 ± 0.02 0.85 ± 0.02 0.82 ± 0.07 
+
+64 F 0.65 ± 0.04 0.69 ± 0.01 0.71 ± 0.01 0.67 ± 0.01 0.64 ± 0.01 0.76 ± 0.01 0.77 ± 0.01 0.67 ± 0.00 0.61 ± 0.00 0.75 ± 0.06 0.69 ± 0.06 
+
+500 full (F) 16 F 0.98 ± 0.04 0.98 ± 0.01 0.99 ± 0.01 1.00 ± 0.00 0.99 ± 0.00 0.96 ± 0.05 0.93 ± 0.10 0.94 ± 0.09 1.00 ± 0.00 0.99 ± 0.00 0.98 ± 0.05 
+
+32 F 0.92 ± 0.07 0.84 ± 0.20 0.92 ± 0.10 0.98 ± 0.02 0.97 ± 0.02 0.89 ± 0.08 0.82 ± 0.13 0.84 ± 0.11 0.99 ± 0.00 0.99 ± 0.02 0.92 ± 0.10 
+
+64 F 0.80 ± 0.00 0.67 ± 0.21 0.78 ± 0.11 0.90 ± 0.07 0.86 ± 0.08 0.76 ± 0.00 0.67 ± 0.00 0.70 ± 0.00 0.96 ± 0.03 0.99 ± 0.00 0.81 ± 0.13 
+
+Table 15: Reconstruction error on random LoRAs The error is larger in comparison to reconstructing trained (i.e., non-random) LoRAs in Table 14 for the corresponding compression methods. Model Type Method Type Tasks Average task039 task190 task280 task290 task391 task442 task620 task1342 task1391 task1598 base 24.44 1.60 19.13 39.22 10.27 35.46 7.85 6.22 17.82 38.87 20.09 lora 95.00 86.00 99.00 93.67 94.33 74.88 74.40 26.68 95.00 50.32 78.93 10 full (F) 32 F 97.00 90.00 99.00 93.33 94.67 74.09 72.13 27.83 94.00 50.71 79.28 64 F 95.00 89.00 99.00 93.67 94.67 74.29 74.80 26.63 96.00 51.04 79.41 50 full (F) 32 F 96.00 88.00 99.00 93.67 92.33 72.30 75.97 29.89 94.00 45.68 78.68 64 F 98.00 89.00 99.00 93.67 93.33 72.74 76.50 29.33 96.00 45.71 79.33 100 full (F) 32 F 92.10 83.00 99.00 93.67 92.00 71.09 63.29 27.87 88.00 42.36 75.24 64 F 97.00 87.00 99.00 93.67 92.33 72.23 74.69 29.98 95.00 44.71 78.56 500 full (F) 32 F 68.92 43.00 87.00 91.67 90.67 70.08 51.16 14.40 83.00 41.97 64.19 64 F 93.50 78.00 91.00 92.33 90.33 72.55 57.49 15.44 85.00 42.31 71.80 Table 16: Performance with convergence In-Distribution Rouge-L 
+
+Table 17: Agreement Comparison. 100 LoRAs 
+
+Configuration Agreement (%) 
+
+Base Model 83.015 Uncompressed LoRAs 100.000 
+
+Joint Compression 
+
+Diagonal Rank 8 87.032 Rank 16 88.908 Rank 32 91.545 Rank 64 94.659 Full Rank 8 87.686 Rank 16 90.163 Rank 32 94.018 Rank 64 96.918 33 Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead 
+
+Table 18: Performance Comparison. 100 LoRAs              
+
+> Configuration Average Performance
+> Base Model 32.28 Uncompressed LoRAs 48.32
+> Join Compression
+> Diagonal Rank 8 41.90 Rank 16 45.44 Rank 32 46.89 Rank 64 47.43 Full Rank 8 43.88 Rank 16 45.79 Rank 32 46.83 Rank 64 47.66
+
+Table 19: Task-Based Performance Evaluation Across Different Models and Ranks 
+
+Task Base Model LoRA Diagonal R8 Diagonal R16 Diagonal R32 Diagonal R64 
+
+Causal Judgement 57.47 64.37 55.17 58.62 58.62 58.62 Date Understanding 15.33 23.33 20.67 22.00 21.33 22.67 Formal Fallacies 51.33 56.00 52.67 52.67 53.33 54.67 Hyperbaton 6.67 68.00 57.33 63.33 67.33 68.00 Logical Deduction (5 Objects) 21.33 37.33 32.00 36.67 37.33 37.33 Logical Deduction (7 Objects) 12.67 44.00 31.33 42.67 44.67 45.33 Movie Recommendation 62.67 67.33 62.00 64.67 66.67 67.33 Object Counting 34.67 38.00 35.33 36.67 36.67 38.00 Snarks 50.00 61.54 53.85 56.41 58.97 57.69 Temporal Sequences 16.67 23.33 18.67 20.67 24.00 24.67 
+
+Average 32.88 48.32 41.90 45.44 46.89 47.43 Table 20: Task-Based Performance Evaluation Across Different Models and Ranks 
+
+Task Base Model LoRA Full R8 Full R16 Full R32 Full R64 
+
+Causal Judgement 57.47 64.37 56.32 57.47 58.62 60.92 Date Understanding 15.33 23.33 19.33 22.00 22.67 22.67 Formal Fallacies 51.33 56.00 51.33 52.67 53.33 56.00 Hyperbaton 6.67 68.00 63.33 66.00 69.33 68.00 Logical Deduction (5 Objects) 21.33 37.33 35.33 36.00 35.33 37.33 Logical Deduction (7 Objects) 12.67 44.00 40.00 44.67 44.67 44.67 Movie Recommendation 62.67 67.33 63.33 65.33 67.33 67.33 Object Counting 34.67 38.00 35.33 36.67 37.33 37.33 Snarks 50.00 61.54 53.85 55.13 57.69 58.97 Temporal Sequences 16.67 23.33 20.67 22.00 22.00 23.33 
+
+Average 32.88 48.32 43.88 45.79 46.83 47.66 34

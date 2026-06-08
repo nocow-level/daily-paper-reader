@@ -1,0 +1,411 @@
+Title: msf-CNN: Multi-Stage Fusion with Convolutional Neural Networks for TinyML
+
+URL Source: https://openreview.net/pdf?id=YEm8MV6b6X
+
+Number of Pages: 12
+
+Markdown Content:
+000 001 002 003 004 005 006 007 008 009 010 011 012 013 014 015 016 017 018 019 020 021 022 023 024 025 026 027 028 029 030 031 032 033 034 035 036 037 038 039 040 041 042 043 044 045 046 047 048 049 050 051 052 053 054 
+
+# msf-CNN: Multi-Stage Fusion with Convolutional Neural Networks for TinyML 
+
+Anonymous Authors 1
+
+# Abstract 
+
+AI spans from large language models to tiny mod-els running on microcontrollers (MCUs). Ex-tremely memory-efficient model architectures are decisive to fit within an MCU’s tiny memory bud-get e.g., 128kB of RAM. However, inference latency must remain small to fit real-time con-straints. An approach to tackle this is fusion ,which aims to optimize data flows across neu-ral network layers. In this paper, we introduce 
+
+msf-CNN , a novel technique that efficiently finds optimal fusion settings for convolutional neural networks (CNNs) by walking through the fusion solution space represented as a directed acyclic graph. Compared to previous work on CNN fu-sion for MCUs, msf-CNN identifies a wider set of solutions. We published an implementation of msf-CNN running on various microcontrollers (ARM Cortex-M, RISC-V, ESP32). We show for instance that msf-CNN achieves inference using 50% less RAM compared to the prior art (MCUNetV2 and StreamNet). msf-CNN thus of-fers additional flexibility for system designers. 
+
+# 1. Introduction 
+
+Artificial Intelligence of Things ( AIoT ) is a domain aiming to embed AI in the smallest networked devices (Ghosh et al., 2018). As such AIoT is pushing the miniaturization of Deep Neural Networks ( DNN s) to fit microcontroller-based hard-ware, which enables various applications at the edge of the network. Use-cases include vision/audio recognition, envi-ronmental monitoring, personalized medical care, etc. How-ever, imbalance between the increasing resource require-ments of DNN s and the very limited computation capacity (CPU in MHz) and memory resource of Microcontroller Units ( MCU s) remains a challenge in deploying DNN s on Internet of Things ( IoT ) devices. For instance, as described in RFC7228 (Bormann et al., 2014), billions of IoT de-vices are resource-constrained devices, with Random Ac-
+
+> 1. Correspondence to: Anonymous Author . Preliminary work. Under review by the International Conference on Machine Learning (ICML). Do not distribute.
+
+cess Memory ( RAM ) smaller than 50 KiB, and Flash mem-ory smaller than 250 KiB. On the other hand, even a single convolutional layer in quantized ResNet-34 (Koonce, 2021; He et al., 2016) consumes around 414.72 KiB in RAM . This example highlights the huge gap between memory budgets on IoT devices and RAM usage of DNNs. A technique aimed at decreasing this gap is layer fusion , in-troduced in (Alwani et al., 2016). Initially targeting FPGAs, fusion reduces off-chip Dynamic RAM ( DRAM ) require-ments and communication bus transfer costs for inference with CNNs. Fusion is great for low-memory devices be-cause it can save up to 95% of RAM usage. Moreover, Fusion decouples input size from memory usage, allowing for larger input. Recent work has thus explored the use of fusion on MCU s, for example, to improve the memory consumption of the first few convolutional layers of Mo-bileNetV2 (Lin et al., 2021). Nevertheless, we observe that significant issues linger on MCU s. First, intermediate feature maps inside the fusing block incur a high (re)compute cost. Second, input size lim-its hamper many use-cases such as medical image process-ing, sequence time series analysis (e.g. audio application), etc. Third, implementations of fusion on MCU s have so far been very hardware-specific (e.g. bound to the ARM-Cortex-M7 instruction set) and model-specific (e.g. bound to CNN mobile inverted blocks). 
+
+Contributions – With the goal of improving on the above issues, we report on following work: • We propose msf-CNN, a fusion-based approach to achieve ultra-low RAM footprint of neural network inference and we open-source its implementation; • We formulate the problem of finding optimal fusion set-tings that minimize peak RAM usage or compute cost of neural networks as a variant shortest path problem. • We provide graph models representing multi-stage fu-sion neural networks, which encode peak RAM usage and compute cost of single and fused layers. • We designed a pruning strategy to squeeze the search space and use graph-based algorithm to find solu-tions in reasonable time complexity (From O(2 N −2)
+
+to O(N 2)). 1055 056 057 058 059 060 061 062 063 064 065 066 067 068 069 070 071 072 073 074 075 076 077 078 079 080 081 082 083 084 085 086 087 088 089 090 091 092 093 094 095 096 097 098 099 100 101 102 103 104 105 106 107 108 109 
+
+> msf-CNN: Multi-Stage Fusion with Convolutional Neural Networks for TinyML
+
+• We improved global pooling and dense operators to fur-ther squeeze RAM usage without compute overhead. • We released preliminary evaluation results on MCU-based IoT boards. We compared common CNN, StreamNet, MCUNetV2 and msf-CNN on a variety of microcontrollers. We show that msf-CNN allows new trade-off between memory saving and compute overhead. 
+
+# 2. Background 
+
+Fusion for DNN on FPGA & GPU – Fusion was initially proposed in (Alwani et al., 2016) as a fusion scheme for Convolutional Neural Network ( CNN ) deployed on Field Programmable Gate Array ( FPGA ) to reduce the off-chip DRAM usage and I/O overhead. Instead of computing the complete feature maps for each layer, it fuses convolutional layers into a single block (pyramid structure) and computes only one or a few output elements. This approach requires only small portions (tiles) of the feature maps loaded onto DRAM . However, the reduction of RAM is at the cost of re-computing the overlapped elements in feature maps required by adjacent fused layers. DeFiNES (Mei et al., 2023), an-other fusion framework, explored different cache strategies within fused layers to alleviate the re-computation issue. (Fully-recompute, H-Cached & V-recompute, and Fully-cache). Fully-recompute eliminates caching entirely, requir-ing all overlapping input tensor elements to be recalculated; H-cached & V-recompute caches elements along the hori-zontal axis while recomputing vertical overlaps; and Fully-cache retains all overlapping elements in memory. These approaches illustrate a critical trade-off—enhanced caching progressively reduces compute redundancy but proportion-ally increases RAM usage, with cached element quantity in-versely correlating to compute overhead and directly scaling with memory demands. Additional work has also applied fusion on GPUs, for instance (Pinckaers et al., 2022) used it for cancer detection in medical pictures. 
+
+Fusion on MCUs – Work on MCUNetV2 (Lin et al., 2021) has applied fusion on MobileNetV2 to reduce the peak RAM usage. It revealed that layers at the head of the model dom-inate the RAM usage. Hence these layers were fused into one block to reduce RAM usage significantly. The recom-pute issue was mitigated by redistributing the receptive field, so the receptive field inside the fusion block was decreased and regained at a later stage. Work on StreamNet (Zheng et al., 2024a) introduced a two-dimensional tensor cache to significantly reduce re-compute operations in a fusion block and applied brute force to search for optimal fusion position and cache depth. Nevertheless, no prior work explored the potential of multiple fusion blocks in CNNs. 
+
+Representing DNNs as Inverted Dataflow Graphs – 
+
+Dataflow graph have been widely used for modeling DNN ,Conv / Pooling  
+
+> Conv / Pooling
+> Conv / Pooling
+
+…...  
+
+> Conv / Pooling
+> Conv / Pooling
+> GlobalPooling / Dense
+> Fusion Blocks with
+> Layer Cache
+> Iterative
+> GlobalPooling / Dense
+
+…... 
+
+Fused 
+
+Rewrite  …... 
+
+Output 
+
+Original CNN 
+
+> MLP
+
+Output 
+
+> MLP
+
+msf-CNN  
+
+> Figure 1. Overview of msf-CNN. The convolutional layers are fused into several fusion blocks based on the optimal setting found by optimizer. We let global Pooling and dense layers compute the outputs iteratively to further squeeze RAM usage.
+
+as pioneered by TensorFlow and PyTorch (Abadi et al., 2016; Paszke et al., 2019). The data (tensor) flows along-side the directed edge between nodes which indicates the operations (convolution, pooling, addition, etc.) applied on the incoming edges (tensors). This representation shows the producer-consumer relations among operations and has great expressiveness and flexibility, enabling automatic dif-ferentiation and concurrent execution of independent opera-tions. 
+
+# 3. High-Level Idea 
+
+Inspired by the above previous works, msf-CNN aims to answer the following questions: (1) Where to fuse and how to determine the fusion position/depth? (2) Under specific resource constraints, how to find the optimal fusion settings? As depicted in Figure 1, msf-CNN determines fusion set-tings (fusion position and depth), transforms layers accord-ingly into fusion blocks and rewrites global pooling and dense layers as their iterative implementation, which can further squeeze RAM usage without any computation over-head. To guide us in doing so, we use inverted dataflow graphs to model CNNs, where tensors are represented as nodes, and operations are depicted as edges connecting them. On this graph, we encode into the edges the resource usage of the operations, and use additional edges to represent fusion blocks. This allows us to design graph-based strategies to find optimal solutions with lower computational complexity using proven graph algorithms. 2110 111 112 113 114 115 116 117 118 119 120 121 122 123 124 125 126 127 128 129 130 131 132 133 134 135 136 137 138 139 140 141 142 143 144 145 146 147 148 149 150 151 152 153 154 155 156 157 158 159 160 161 162 163 164 
+
+msf-CNN: Multi-Stage Fusion with Convolutional Neural Networks for TinyML 
+
+# 4. Problem Definitions & Assumptions 
+
+We aim to solve a pair of dual optimization problems. Let 
+
+χ be the set of all possible configurations for fusion blocks. We define P1 as the problem of minimizing peak RAM usage subject to a computation cost limit: 
+
+min  
+
+> S
+
+P (χ, S ) (1) s.t. F (χ, S ) < F max (2) where P is the peak RAM usage, and F is the computation overhead for inference under fusion setting S, relatively to inference without fusion (thereafter denoted vanilla ). The compute cost limit and RAM limit are annotated by Fmax 
+
+and Pmax , respectively. Dually, we define P2 as the prob-lem of minimizing computation cost subject to a RAM footprint limit: 
+
+min  
+
+> S
+
+F (χ, S ) (3) s.t. P (χ, S ) < P max (4) Without loss of generality, we only discuss fusion blocks of convolutions. We assume a H-Cache scheme, which we chose to be a good trade-off between buffer size and recompute cost on MCU s. For a fusion block containing n
+
+layers, the cache buffer size of the i-th layer under H-cache scheme is given by Buf i = ti × ki × cin i (5) where ti, ki and cin i are the tile size, kernel size and input channels number, respectively. Obviously, the first layer of the fusion block does not need any input cache, thus Buf 1 = 0 . The total cache size of the fusion block is Buf =P 
+
+> i
+
+Buf i.In Appendix A, we further detail the analysis of the number of multiply–accumulate (MAC) operations. 
+
+# 5. DNN Graph Representation & Formulation 
+
+We interpret the optimization problems described in Sec-tion 4 by modeling the DNN as data-nodes graph. We trans-form the problem as a shortest path problem (Sedgewick, 2001) and use off-the-shelf graph algorithms to find a solu-tion that minimizes the peak memory usage as well as com-pute cost during inference regarding specified constraints. 
+
+5.1. DNN Representation 
+
+As described in Section 2, we model a DNN as a directed acyclic graph ( DAG ) G = (V, E ) with data nodes 
+
+v0, . . . , v n representing input/output tensors of consecutive layers and m edges e1, . . . , e m that represent single layers or fusion blocks. Each edge is also encoded with resource Optimal (min-max):                          
+
+> (e 5, e 3, e 4) | 10 kB
+> v0v1v2v3v4
+> e1e2e3e4
+> e5
+> e6
+> 15 kB 10 kB 10 kB 2 kB
+> 8 kB
+> 2 kB
+> RAM Usages
+> v0v1v2v3v4
+> e1e2e3e4
+> e5
+> e6
+> 10 M 15 M 15 M 5 M
+> 40 M
+> 35 M
+> MAC Operations
+> Optimal (shortest):
+> (e 1, e 2, e 3,e4) | 45 M
+> Conv / Pooling: e 2
+> Conv / Pooling: e 1
+> Conv / Pooling: e 4
+> Conv / Pooling: e 3
+> v0
+> v4
+> v1
+> v2
+> v3
+> e5
+> e6
+
+Figure 2. The neural network is modeled as a DAG . Nodes vn
+
+denote the tensors that are produced and consumed by the operators or possible fusion blocks. Edges e1, . . . , e 4 represent individual operators, while edge e5, e 6 represent two candidate fusion blocks. Edges are annotated with the RAM usage and MAC amounts of their corresponding operators and fusion blocks. 
+
+requirements by layer or fusion block. Specifically, the first (v0) and the last node ( vn) are the input and output tensor of the neural network, respectively. In general, the edge represents the input/output relation of nodes and also indicates the fusion depth inside the neural network. For example, an edge that connects consecutive vertices e = vn → vn+1 is a single layer that consumes 
+
+vn as input tensor and outputs tensor vn+1 , while an edge that jumps over multiple vertices e = vn → vn+m, m > 1
+
+represents a fusion block with m layers. Each complete compute path from v0 to vn represents a fusion setting S.A typical example depicted in Figure 2 explains how to use DAG for representing a simple neural network. Tensors are transformed into nodes, operators and fusion blocks are edges. Edges are encoded with RAM usages and MAC amounts of their corresponding operators. Hence, the prob-lem is transformed to find an optimal path from the input node to the output node of the graph. 
+
+5.2. Encoding RAM Usage 
+
+We first calculate the RAM usages Pei of all single layers and all possible fusion blocks inside the neural network by 
+
+Pei = I + O + Buf (6) where I and O are the size of input and output tensor, respec-tively. Buf represents the cache buffer size of the fusion block, which is determined by the chosen cache scheme. In this work it is given in Equation (5). Trivially, for non-fused layers Buf is always set to zero since no fusion cache is needed. Thereafter, the calculated RAM usages are attached to the corresponding edges for further analysis. For a complete compute path contains n edges S = ( ei1 , . . . , e in ) we can 3165 166 167 168 169 170 171 172 173 174 175 176 177 178 179 180 181 182 183 184 185 186 187 188 189 190 191 192 193 194 195 196 197 198 199 200 201 202 203 204 205 206 207 208 209 210 211 212 213 214 215 216 217 218 219 
+
+> msf-CNN: Multi-Stage Fusion with Convolutional Neural Networks for TinyML
+
+then calculate the overall peak RAM usage PS by 
+
+PS = max  
+
+> j=1 ...n
+
+Peij (7) 
+
+5.3. Encoding Compute Cost 
+
+The encoding steps of compute cost are similar to encoding peak memory usage. Here we use MAC operations as the indicator of compute cost. In this paper, the MAC amount of fusion block is given in Equation (16) and Equation (17). After attaching the calculated MAC s to the edges, the total compute cost of a complete compute path S is 
+
+CS =
+
+> n
+
+X
+
+> j=1
+
+Ceij (8) Therefore, the compute overhead factor F representing the ratio of the MAC amount after fusion to the vanilla, common one without fusion is expressed as 
+
+F = CS /C vanilla . (9) For the constraints in Equation (2), users can set a maximum compute overhead factor Fmax expressed as 
+
+Fmax = Cmax /C vanilla . (10) In the following sections, we will discuss several graph-based algorithms to solve the optimization problem. 
+
+# 6. Searching for Optimal Fusion Settings 
+
+After building an inverted dataflow graph of a DNN with all possible fusion combinations (edges), the two dual prob-lems are indeed transformed into classic graph problems: finding an optimal complete compute path from the input tensor node v1 to the output tensor node vn under specific constraints. 
+
+Impact of Search Space Size – If we consider the un-constrained optimization, the solution is trivial: the single-source-single-target shortest path, which can be found by classical graph algorithm like Dijkstra’s (Dijkstra, 2022) with the time complexity of O(E log ( V )) . However, when considering the constraints, it is necessary first to explore all possible complete compute paths that meet the conditions, which can potentially explode the complexity to O(2 V −2)
+
+(Robert, 2002) in the worst case. Hence, we need a smarter strategy to squeeze the search space and avoid horrendous complexity. 
+
+6.1. Problem P1: Minimizing Peak RAM Usage 
+
+The unconstrained optimization is to find a complete com-pute path with minimal peak RAM usage, which is equiva-lent to finding the path that minimizes the maximum weight of edges (minimax path problem). As mentioned above, this can be solved by modified Dijkstra algorithm. An ex-ample path with minimal peak RAM usage is presented in Figure 2. For the constraint of compute cost limit (Equation (2)), the pruning strategy needs co-design with its optimization prob-lem (Equation (1)). We noticed that all possible peak RAM usages have already been encoded into the edges. There-fore, the problem can be transformed into the following: we first construct a candidate solution set candidate set 
+
+{S0, S 1, . . . , S i, . . . } with 
+
+Si = arg min  
+
+> S
+
+C(Gi, S ), (11) 
+
+Gi := subgraph of Gi−1, obtained by removing all edges in Gi−1 with the maximal RAM usage , (12) 
+
+G0 = G (13) where C(Gi, S ) is the MAC amount of fusion setting S
+
+in graph Gi. The candidate solution Si can be obtained by applying the shortest path algorithm. We then filter the candidate solutions to find those that satisfy the constraints and select the one with the smallest RAM usage as the optimal solution. In this way, we avoid constructing a search space with a complexity of O(2 V −2). Instead, we iteratively eliminate subgraphs and solve for candidate solutions, reducing the complexity to O(V 2). For most deep neural networks run-ning on MCUs, this process can be done in few seconds. 
+
+6.2. Problem P2: Minimizing Compute Cost 
+
+We first discuss the unconstrained variant, which is identical to Pmax = ∞. In this case, finding the solution is equivalent to finding the shortest complete compute path – the path with a minimal sum of MAC – of the graph, which can be again solved by classical algorithm like Dijkstra’s (Dijkstra, 2022). Figure 2 shows an example with an optimal path marked in red. When bringing back the constraint of RAM limit, the prun-ing step is simple: eliminating all edges with encoded RAM usage exceeding the limit. So, all paths in the graph will automatically fulfill the limitation. 
+
+6.3. Analytical Results 
+
+To explore the capability of these two dual optimizers, here we choose three variants of MobileNetV2 and MCUNet (Sandler et al.; Lin et al., 2021) with different scales for the pilot study: MobileNetV2 with width multiplier 0.35 and input size of 144 × 144 × 3 (MBV2-w0.35), MCUNetV2-VVW-5fps with input size of 80 × 80 × 3 (MN2-vvw5), MCUNetV2-320KB-ImageNet with input size of 176 ×
+
+176 × 3 (MN2-320K). For optimizer of minimizing peak 4220 221 222 223 224 225 226 227 228 229 230 231 232 233 234 235 236 237 238 239 240 241 242 243 244 245 246 247 248 249 250 251 252 253 254 255 256 257 258 259 260 261 262 263 264 265 266 267 268 269 270 271 272 273 274 
+
+msf-CNN: Multi-Stage Fusion with Convolutional Neural Networks for TinyML 
+
+RAM usage, the maximal compute overhead factor ranges from 1.1 to 1.5 then jumps to Infinite, which represents an unconstrained optimization. For optimizer of minimizing compute cost, the maximal peak RAM usage was set from 16 kB to 256 kB where each level represents a popular RAM capacity of mainstream MCUs. As shown in Table 1, both optimizers can indeed theoret-ically suppress the peak RAM usage without violating all preset constraints. The high RAM usage compression is achieved with increase of deep fusion blocks, thereby intro-ducing a high compute overhead. The extreme cases lay on the unconstrained optimization minimizing the RAM usage by more than 90% , while reluctantly introducing 1.6× to 
+
+2.7× of compute overhead. This is only suitable for time-intensive applications with a high limited RAM budget. On the other hand, setting appropriate constraints can still lead to well-optimized configurations, with our tools offer-ing flexibility to accommodate real-life scenarios. Under different thresholds on compute overhead factor or peak RAM usage, the solutions that optimizer found are all ful-fill the constraints and with RAM usage all lower than the vanilla, un-fused setting. In some cases, it is even possi-ble to compress RAM usage without incurring additional computational overhead. These pilot studies demonstrate the effectiveness of finding usable solutions under real-life constraints. The analytical results were further validated by on-board experiments presented in Section 8. 
+
+# 7. msf-CNN Implementation Details 
+
+We have implemented the msf-CNN fusion mechanism on top of microTVM v0.16.0 (Chen et al., 2018). We use the TVM frontend to convert models into intermediate repre-sentation ( IR ), and rewrite the compute graph and low-level routines of operators to fit the fusion settings. We leveraged RIOT-ML (Huang et al., 2024) to benchmark the fused mod-els (transform into C code by microTVM) on the IoT boards shown in Table 2. 
+
+Sequential RAM Usage – We have optimized the RAM usage of the global pooling and fully connected (Dense) lay-ers. We observed that the outputs of these two basic blocks can be computed iteratively, and in most scenarios, their input dimensions are much larger than their output dimen-sions. As a result, we can temporally divide the input and sequentially process it through the iterative global pooling or dense layers, which further minimizes memory usage. If their upstream is a fusion block, this perfectly matches the feature of temporally split inputs, enabling them to be fused seamlessly. 
+
+Iterative Computation of Global Pooling – As illustrated 2 = IterPool  1 ,        
+
+> 1= IterPool 0,
+> n= IterPool n-1 ,
+> …...
+> = Pool
+> (Iter)Pool {min, max, average} ∈
+> Elements in memory
+> Common Global Pooling Iterative Global Pooling
+
+Figure 3. Comparison of common and iterative global pooling. Common Dense  Iterative Dense             
+
+> Elements in memory
+> Flatten
+> W(1) W(2) ... W(n) × =
+> 12
+> n
+> =1W(1) ×+2W(2) ×nW(n) ×+...+
+> 1. Iteration
+> 2. Iteration
+> n-th Iteration
+
+Figure 4. Comparison of common and iterative dense layer. The columns of the weight matrix are denoted as w(n).
+
+in Figure 3, standard global pooling requires that all ele-ments of the input tensor stored in RAM . In our approach, the global pooling layer receives one or a few input elements at each step and iteratively updates the result. For a 7 × 7
+
+global pooling layer, this allows us to compress the RAM usage to 2% of the original size, without introducing any redundant computations or computation overhead. 
+
+Iterative Computation of Dense Layer – We noted that the matrix multiplication in dense layers can be implemented by splitting the input vector into individual elements, multi-plying each element with its corresponding weight column, and iteratively summing the results, as shown in Figure 4. Unlike the original approach, which requires the complete input tensor, this method processes only one element of the input tensor per iteration. For a 1024 →256 dense layer, this approach compresses memory usage to 20% of the original. 
+
+# 8. Experiments on Microcontrollers 
+
+In this section we report on experiments running msf-CNN on various MCU s, aiming to validate both the correctness of our optimization strategies and their versatility when applied on diverse IoT devices. 5275 276 277 278 279 280 281 282 283 284 285 286 287 288 289 290 291 292 293 294 295 296 297 298 299 300 301 302 303 304 305 306 307 308 309 310 311 312 313 314 315 316 317 318 319 320 321 322 323 324 325 326 327 328 329  
+
+> msf-CNN: Multi-Stage Fusion with Convolutional Neural Networks for TinyML
+> Table 1. Analytical results with msf-CNN under different constraints. Vanilla: un-fused models. SAA: Same as above.
+
+MBV2-w0.35 MN2-vww5 MN2-320K Constraint RAM (kB) F RAM (kB) F RAM (kB) F
+
+Vanilla - 194.44 1 96 1 309.76 1P1: Fmax 
+
+1.1 67.905 1.1 32.792 1.04 190.096 1.04 1.2 (SAA) 26.128 1.11 186.736 1.19 1.3 21.288 1.3 17.76 1.3 186.032 1.25 1.4 15.34 1.38 13.376 1.35 156.672 1.37 1.5 (SAA) (SAA) 94.184 1.45 Inf 7.887 1.68 12 1.96 42.643 2.69 P2: Pmax 
+
+16 kB 15.34 1.38 13.376 1.35 (No Solution) 32 kB 25.674 1.25 26.128 1.11 64 kB 63.741 1.23 38.576 1.02 62.88 2.02 128 kB 83.065 1.02 89.6 1 94.184 1.45 256 kB 181.44 1 (SAA) 247.808 1More concretely, we measured peak RAM usage and com-pute latency based on the fusion settings in Section 6.3, as reported in the following. As shown in Table 2, we carried out our experiments on the relevant 32-bit micro-controller architectures: Arm Cortex-M, Espressif Xtensa, and RISC-V. For our model zoo, we chose MBV2-w0.35, MN2-vww5 and MN2-320K as they are good representa-tives of backbones for applications in AIoT (Saha et al., 2022), as also used in prior works (Lin et al., 2021; Zheng et al., 2024a). We compare msf-CNN performance to the closest related work: MCUNetV2 (Lin et al., 2021) and StreamNet-2D (Zheng et al., 2024a), more simply denoted StreamNet in the following. 
+
+8.1. Minimal Peak RAM Usage 
+
+First, we evaluated solutions to P1 while relaxing Equa-tion (2), i.e. the fusion settings with minimum peak RAM us-age, without compute time constraint. Results are shown in Table 3. We observe that, compared to prior art (StreamNet-2D and MCUNetV2), msf-CNN can further reduce the peak RAM usage by 65% to 87%. We could even deploy the MBV2-w0.35 model onto the SiFive board that provides only 16 kB RAM (!). However, achieving this high compres-sion ratio comes at the expense of increased computational latency, which we measured in Table 4. Interestingly, while clock frequency plays a decisive role, MCU architecture can also have a crucial effect, for larger models. For instance, no-tice latency with Xtensa esp32s3 at 240MHz versus RISC-V esp32c3 at 160 MHz, for the MN2-320K model (in Table 4). Nevertheless, we measured that latency increases 2× to 5×
+
+compared to vanilla (non-fused) CNN. Hence, such min-imal RAM settings are only suitable for latency-tolerant applications on the smallest devices. 
+
+8.2. Impact of RAM Budget Limit 
+
+As shown in Table 5, the measured peak RAM usage consis-tently obeys to the given constraints, thereby validating the correctness of the optimizer and corroborating our analytical results. Based on these, we observe that higher RAM bud-gets result in shorter compute latency for the optimal fusion configurations identified by msf-CNN. This is because the optimizer tends to favor configurations with either no fusion or shallow fusion depths, which correspond to higher peak RAM usage but lower computational costs. For the MBV2-w0.35 and MN2-vww5 models, our method outperforms MCUNetV2 when the RAM limit is set to 32kB and 64kB. Although our method does not surpass StreamNet-2D across the board, msf-CNN does demonstrate its flexibility, enabling users to select the optimal fusion configuration under varying memory budgets. 
+
+8.3. Impact of Computation Cost Limit 
+
+When capping computation cost as a constraint, the rela-tion between compute latency and peak RAM usage is con-sistent (dual) with the previous section, such that higher compute overhead budgets result in longer compute latency and smaller peak RAM usage. We also observe that the ratio F measuring the overhead compared to vanilla CNN (no fusion) is bigger than the Fmax we set for. This dis-crepancy comes from the fact that the optimizer computes the amount of MAC operations, whereas the full latency includes not only MAC operations but also I/O delays. In mainstream MCU s, model weights are stored in Flash rather than RAM, which introduces substantial additional latency during read operations, thereby contributing to higher com-pute latency. Specifically, when recomputation occurs, the weights must be refetched from flash memory, which could disrupt cache hits and lead to increased overall latency. De-spite this discrepancy, our method still generates fusion 6330 331 332 333 334 335 336 337 338 339 340 341 342 343 344 345 346 347 348 349 350 351 352 353 354 355 356 357 358 359 360 361 362 363 364 365 366 367 368 369 370 371 372 373 374 375 376 377 378 379 380 381 382 383 384  
+
+> msf-CNN: Multi-Stage Fusion with Convolutional Neural Networks for TinyML
+> Table 2. The different microcontrollers & boards used in our experiments.
+
+Board MCU Core RAM (kB) Flash (kB) Nucleo-f767zi STM32F767ZI Cortex-M7 @ 216 MHz 512 2048 Stm32f746g-disco STM32F746NG Cortex-M7 @ 216 MHz 320 1024 Nucleo-f412zg STM32F412ZG Cortex-M4 @ 100 MHz 256 1024 esp32s3-devkit ESP32-S3-WROOM-1N8 Xtensa @ 240 MHz 512 8192 esp32c3-devkit ESP32c3-1-MINI-M4N4 RISC-V @ 160 MHz 384 4096 hifive1b SiFive FE310-G002 RISC-V @ 320 MHz 16 4096  
+
+> Table 3. Minimal peak RAM use, measured in kB. (Vanilla: un-fused model)
+
+MBV2-w0.35 MN2-vww5 MN2-320K 
+
+(Fusion) 
+
+Vanilla 194.44 96 309.76 MCUNet V2 63 45 215 StreamNet 66 44 208 
+
+msf-CNN 8.56 15.368 51.164   
+
+> Table 4. Inference execution time, measured in ms , with msf-CNN tuned with minimal peak RAM. (OOM: Out-of-Memory)
+
+MBV2-w0.35 MN2-vww5 MN2-320K 
+
+(MCU) 
+
+stm32f767 1996.8 1723.0 19329.9 stm32f746 1379.6 1727.5 16261.9 stm32f412 5270.1 4943.4 56979.0 esp32s3 6748.2 5974.1 76763.6 esp32c3 6792.7 6248.9 73713.8 SiFive 10000.0 OOM OOM configurations for the MBV2-w0.35 and MN2-vww5 mod-els that outperform MCUNetV2. Particularly for memory-sensitive but time-insensitive applications, we can set the constraint Fmax to infinity, thereby obtaining novel fusion configurations with minimal RAM usage. 
+
+# 9. Discussion 
+
+Our experiments demonstrate msf-CNN’s capability to op-timize resource usage with diverse CNN models, under user-specified constraints emphasizing either compute la-tency or RAM footprint. Furthermore, msf-CNN generates code that is deployable across diverse microcontroller ISAs. Users can thus produce optimal CNN fusion configurations tailored to specific industrial hardware requirements. How-ever, some limitations remain, on which our future work will focus next. 
+
+Parameter Space – The current optimization scope is limited to fusion block positioning and depth selection, with the number of output elements per iteration fixed at one. This parameter significantly impacts both memory footprint and compute overhead, which warrants further exploration. 
+
+Caching Paradigm – The search space currently incorpo-rates only the H-cache paradigm. Future implementations should integrate alternative caching strategies to enhance optimization flexibility. 
+
+Neural Network Architecture – The work currently fo-cuses exclusively on convolutional neural network architec-tures (CNNs). The analysis of other prevalent structures, particularly attention mechanisms and recurrent neural net-works (RNNs), remains an open research direction. 
+
+# 10. Related Work 
+
+Machine Learning Compilers for MCUs – Compilers such as Tensor Virtual Machine ( TVM )(Chen et al., 2018), IREE(The IREE Authors, 2019), FlexTensor (Zheng et al., 2020), and Buddy (Zhang et al., 2023) offer automated tran-spilation and compilation for models produced by major Machine Learning ( ML ) frameworks, including TensorFlow and PyTorch. As an extension of TVM , microTVM provides low-level optimizations and routines tailored for execution on various processing units, including a wide range of mi-crocontrollers. Other prior work such as RIOT-ML (Huang et al., 2024) combine a small general-purpose OS with mi-croTVM, for comprehensive support for ML frameworks and operator implementation on divers MCU s. Similarly, msf-CNN work utilizes microTVM as both the front-end importer for model files and the code generator for low-end platforms. However, none of the above tools provide CNN fusion optimization mechanisms, in contrast to msf-CNN. 
+
+Efficient Neural Network Structure – For models to op-erate on low-power IoT devices, they must be compact and computationally efficient. Studies have demonstrated the use of lightweight CNNs for speech recognition and age classification (Maayah et al., 2023), water leakage detection (Atanane et al., 2023), fall detection for the elderly (Fang et al., 2021) and other tasks (Hussain & Haque, 2018; Zhu-Zhou et al., 2023). Tiny vision transformers have also been employed for classification tasks in various studies (Jinyang Yu et al., 2023; Liang et al., 2023; Yao & Liu, 2023; Wyatt et al., 2021). Besides handcrafting a lightweight structure by reducing layer number or kernel size, people (Iandola 7385 386 387 388 389 390 391 392 393 394 395 396 397 398 399 400 401 402 403 404 405 406 407 408 409 410 411 412 413 414 415 416 417 418 419 420 421 422 423 424 425 426 427 428 429 430 431 432 433 434 435 436 437 438 439   
+
+> msf-CNN: Multi-Stage Fusion with Convolutional Neural Networks for TinyML
+> Table 5. Optimal fusion settings on Nucleo-f767zi. RAM (kB), Latency (ms). SAA: Same as above. Bold: msf-CNN beats MCUNet V2 .
+
+MBV2-w0.35 MN2-vww5 MN2-320K RAM Latency RAM Latency RAM Latency Vanilla 194.44 807.6 96 509.7 309.76 4394.3 MCUNet V2 63 1513.0 45 810.0 215 2777.0 StreamNet 66 417.0 44 225.0 208 1444.0 P1: Min. RAM s.t. Compute Cost Limit 
+
+Fmax 
+
+1.1 67.996 961.9 45.283 696.0 199.6 4171.0 1.2 (SAA) 26.24 769.2 196.072 4525.1 1.3 21.389 1313.8 20.568 922.7 195.333 4680.7 1.4 15.199 1412.3 17.904 931.3 156.864 5128.9 1.5 (SAA) (SAA) 94.224 5370.3 Inf 8.56 1996.8 15.368 1723.0 51.164 19329.9 P2: Min. Compute Cost s.t. RAM Limit 
+
+Pmax 
+
+16 kB 15.199 1412.3 17.904 931.3 (No Solution) 32 kB 25.803 1266.3 26.24 769.2 
+
+64 kB 63.603 1121.7 45.283 684.6 63.456 9458.6 128 kB 83.133 947.0 89.6 683.4 94.224 5370.3 256 kB 181.44 879.2 (SAA) 247.808 3923.2 et al.; Tan & Le; Howard et al., b; Sandler et al.; Howard et al., a) also re-designed the basic blocks to replace com-mon convolutions for lower memory footprint and compute latency. 
+
+Tiny Neural Architecture Search (NAS) This technique is employed to automatically search for model structures with optimal accuracy under the constraints of memory, flash footprint and compute latency. TinyNAS (Lin et al., 2020) and the Once-for-All Network (Cai et al., 2019) leverage Neural Architecture Search ( NAS ) to design CNN s with exceptionally small memory requirements for MCU s. The resulting networks require only a few hundred kilobytes of RAM for execution. However, contrary to msf-CNN, these methods necessitate retraining or fine-tuning of pre-existing networks. 
+
+Memory Optimization for CNN layers – Memory optimization strategies can be broadly categorized into scheduling-based and fusion-based methods. Scheduling-based methods, such as those implemented in frameworks like vMCU (Zheng et al., 2024b), MoDEL (Steiner et al., 2023) and TinyEngine (Lin et al., 2021), focus on the ef-ficient reuse of memory pools to minimize peak memory usage by leveraging the different lifetimes of inter- and intra-layer tensors. For instance, TinyEngine employs in-place tensor updates for depthwise convolutions, enabling the corresponding input and output tensors to share the same memory space. vMCU further generalized this approach for common convolution and pooling operations. Although both methods achieve a peak memory reduction exceeding 50%, they still generate a complete output tensor for each layer. This requirement remains problematic for low-power MCU s with limited RAM , particularly when dealing with large input sizes or an extensive number of output channels. Prior work on fusion was covered in Section 2. Contrary to msf-CNN, these methods do not fully exploit the potential of multiple fusion blocks. 
+
+# 11. Conclusion 
+
+In order to fulfill the full potential of AI, convolutional neu-ral networks (CNNs) must not only execute in the cloud or on edge computing gateways, but also on the smaller microcontroller-based devices which take part in our cyber-physical systems. These small energy-efficient devices pose a great challenge regarding the joint optimization of RAM memory consumption and inference latency for CNNs. In this context, we presented msf-CNN, a technique and heuris-tics able to identify pools of practical fusion-based optimiza-tions for CNN inference which jointly satisfy memory and latency constraints. Compared to previous work on CNN fusion for microcontrollers, msf-CNN identifies a wider set of applicable solutions, on more diverse hardware. Our ex-perimental evaluation using the open source implementation we provide for common microcontrollers (ARM Cortex-M, RISC-V, and ESP32) show that msf-CNN can achieve inference with less than 50% the peak RAM usage state-of-the-art. As such msf-CNN provides a new level of flexibility for embedded system designers, which can now better tune the trade-off between peak RAM and model inference la-tency on various MCUs. 8440 441 442 443 444 445 446 447 448 449 450 451 452 453 454 455 456 457 458 459 460 461 462 463 464 465 466 467 468 469 470 471 472 473 474 475 476 477 478 479 480 481 482 483 484 485 486 487 488 489 490 491 492 493 494 
+
+> msf-CNN: Multi-Stage Fusion with Convolutional Neural Networks for TinyML
+
+# Impact Statement 
+
+This paper presents work contributing to the field of Ma-chine Learning on small microcontrollers. There are many potential societal consequences of our work, none which we feel must be specifically highlighted here. 
+
+# References 
+
+Abadi, M., Barham, P., Chen, J., Chen, Z., Davis, A., Dean, J., Devin, M., Ghemawat, S., Irving, G., Isard, M., et al. {TensorFlow }: a system for {Large-Scale }
+
+machine learning. In 12th USENIX symposium on oper-ating systems design and implementation (OSDI 16) , pp. 265–283, 2016. Alwani, M., Chen, H., Ferdman, M., and Milder, P. Fused-layer CNN accelerators. In 2016 49th Annual IEEE/ACM International Symposium on Microarchitec-ture (MICRO) , pp. 1–12, Taipei, Taiwan, October 2016. IEEE. ISBN 978-1-5090-3508-3. doi: 10.1109/MICRO. 2016.7783725. URL http://ieeexplore.ieee. org/document/7783725/ .Atanane, O., Mourhir, A., Benamar, N., and Zennaro, M. Smart Buildings: Water Leakage Detection Using TinyML. Sensors , 23(22):9210, November 2023. ISSN 1424-8220. doi: 10.3390/s23229210. URL https: //www.mdpi.com/1424-8220/23/22/9210 .Bormann, C. et al. Terminology for Constrained-Node Networks. RFC 7228, May 2014. Cai, H., Gan, C., Wang, T., Zhang, Z., and Han, S. Once-for-all: Train one network and specialize it for efficient deployment. arXiv preprint arXiv:1908.09791 , 2019. Chen, T., Moreau, T., Jiang, Z., Zheng, L., Yan, E., Cowan, M., Shen, H., Wang, L., Hu, Y., Ceze, L., et al. Tvm: An automated end-to-end optimizing compiler for deep learning. arXiv preprint arXiv:1802.04799 , 2018. Dijkstra, E. W. A note on two problems in connexion with graphs. In Edsger Wybe Dijkstra: his life, work, and legacy , pp. 287–290. 2022. Fang, K., Xu, Z., Li, Y., and Pan, J. A Fall Detection using Sound Technology Based on TinyML. In 2021 11th International Conference on Information Technol-ogy in Medicine and Education (ITME) , pp. 222–225, Wuyishan, Fujian, China, November 2021. IEEE. ISBN 978-1-66540-679-6. doi: 10.1109/ITME53901.2021. 00053. URL https://ieeexplore.ieee.org/ document/9750658/ .Ghosh, A., Chakraborty, D., and Law, A. Artificial in-telligence in internet of things. CAAI Transactions on Intelligence Technology , 3(4):208–218, 2018. He, K., Zhang, X., Ren, S., and Sun, J. Deep residual learn-ing for image recognition. In Proceedings of the IEEE conference on computer vision and pattern recognition ,pp. 770–778, 2016. Howard, A., Sandler, M., Chu, G., Chen, L.-C., Chen, B., Tan, M., Wang, W., Zhu, Y., Pang, R., Vasude-van, V., Le, Q. V., and Adam, H. Searching for MobileNetV3. pp. 1314–1324, a. URL https: //openaccess.thecvf.com/content_ ICCV_2019/html/Howard_Searching_for_ MobileNetV3_ICCV_2019_paper.html .Howard, A. G., Zhu, M., Chen, B., Kalenichenko, D., Wang, W., Weyand, T., Andreetto, M., and Adam, H. MobileNets: Efficient convolutional neural networks for mobile vision applications, b. URL http://arxiv. org/abs/1704.04861 .Huang, Z., Zandberg, K., Schleiser, K., and Baccelli, E. RIOT-ML: toolkit for over-the-air secure updates and performance evaluation of TinyML models. Annals of Telecommunications , pp. 1–15, 2024. Hussain, M. S. and Haque, M. A. SwishNet: A Fast Convolutional Neural Network for Speech, Music and Noise Classification and Segmentation. 2018. doi: 10.48550/ARXIV.1812.00149. URL https://arxiv. org/abs/1812.00149 .Iandola, F. N., Han, S., Moskewicz, M. W., Ashraf, K., Dally, W. J., and Keutzer, K. SqueezeNet: AlexNet-level accuracy with 50x fewer parameters and < 0.5 MB model size. Jinyang Yu, Zikai Song, Jiahao Ji, Lixian Zhu, Kele Xu, Qian, K., Dou, Y., and Hu, B. Tiny Audio Spectrogram Transformer: Mobilevit for Low-Complexity Acoustic Scene Classification with Decoupled Knowledge Dis-tillation. 2023. doi: 10.13140/RG.2.2.24001.12646. URL https://rgdoi.net/10.13140/RG.2.2. 24001.12646 .Koonce, B. Resnet 34. Convolutional neural networks with swift for tensorflow: image recognition and dataset categorization , pp. 51–61, 2021. Liang, Y., Wang, Z., Xu, X., Tang, Y., Zhou, J., and Lu, J. MCUFormer: Deploying Vision Transformers on Microcontrollers with Limited Memory. 2023. doi: 10.48550/ARXIV.2310.16898. URL https://arxiv. org/abs/2310.16898 .Lin, J., Chen, W.-M., Lin, Y., Gan, C., Han, S., et al. Mcunet: Tiny deep learning on iot devices. Advances in neural information processing systems , 33:11711–11722, 2020. 9495 496 497 498 499 500 501 502 503 504 505 506 507 508 509 510 511 512 513 514 515 516 517 518 519 520 521 522 523 524 525 526 527 528 529 530 531 532 533 534 535 536 537 538 539 540 541 542 543 544 545 546 547 548 549 
+
+> msf-CNN: Multi-Stage Fusion with Convolutional Neural Networks for TinyML
+
+Lin, J., Chen, W.-M., Cai, H., Gan, C., and Han, S. Memory-efficient Patch-based Inference for Tiny Deep Learning. In Advances in Neural Information Processing Systems , volume 34, pp. 2346–2358. Curran Asso-ciates, Inc., 2021. URL https://proceedings. neurips.cc/paper/2021/hash/ 1371bccec2447b5aa6d96d2a540fb401-Abstract. html .Maayah, M., Abunada, A., Al-Janahi, K., Ahmed, M. E., and Qadir, J. LimitAccess: on-device TinyML based robust speech recognition and age classification. Dis-cover Artificial Intelligence , 3(1):8, February 2023. ISSN 2731-0809. doi: 10.1007/s44163-023-00051-x. URL https://link.springer.com/10.1007/ s44163-023-00051-x .Mei, L., Goetschalckx, K., Symons, A., and Verhelst, M. De-fines: Enabling fast exploration of the depth-first schedul-ing space for dnn accelerators through analytical mod-eling. In 2023 IEEE International Symposium on High-Performance Computer Architecture (HPCA) , pp. 570– 583. IEEE, 2023. Paszke, A., Gross, S., Massa, F., Lerer, A., Bradbury, J., Chanan, G., Killeen, T., Lin, Z., Gimelshein, N., Antiga, L., et al. Pytorch: An imperative style, high-performance deep learning library. Advances in neural information processing systems , 32, 2019. Pinckaers, H., van Ginneken, B., and Litjens, G. Streaming Convolutional Neural Networks for End-to-End Learning With Multi-Megapixel Images. IEEE Transactions on Pattern Analysis and Machine Intelligence , 44 (3):1581–1590, March 2022. ISSN 1939-3539. doi: 10.1109/TPAMI.2020.3019563. URL https:// ieeexplore.ieee.org/document/9178453 .Conference Name: IEEE Transactions on Pattern Analysis and Machine Intelligence. Robert, S. Algorithms in c, part 5: Graph algorithms, 2002. Saha, S. S., Sandha, S. S., and Srivastava, M. Machine learning for microcontroller-class hardware: A review. 
+
+IEEE Sensors Journal , 22(22):21362–21390, 2022. Sandler, M., Howard, A., Zhu, M., Zhmoginov, A., and Chen, L.-C. MobileNetV2: Inverted residuals and linear bottlenecks. pp. 4510– 4520. URL https://openaccess.thecvf. com/content_cvpr_2018/html/Sandler_ MobileNetV2_Inverted_Residuals_CVPR_ 2018_paper.html .Sedgewick, R. Algorithms in c, part 5: graph algorithms, third edition . Addison-Wesley Professional, third edition, 2001. ISBN 9780768685329. Steiner, B., Elhoushi, M., Kahn, J., and Hegarty, J. Model: memory optimizations for deep learning. In International Conference on Machine Learning , pp. 32618–32632. PMLR, 2023. Tan, M. and Le, Q. V. EfficientNet: Rethinking model scaling for convolutional neural networks. URL http: //arxiv.org/abs/1905.11946 .The IREE Authors. IREE, September 2019. URL https: //github.com/iree-org/iree .Wyatt, S., Elliott, D., Aravamudan, A., Otero, C. E., Otero, L. D., Anagnostopoulos, G. C., Smith, A. O., Peter, A. M., Jones, W., Leung, S., and Lam, E. Environmental Sound Classification with Tiny Trans-formers in Noisy Edge Environments. In 2021 IEEE 7th World Forum on Internet of Things (WF-IoT) , pp. 309–314, June 2021. doi: 10.1109/WF-IoT51360. 2021.9596007. URL https://ieeexplore.ieee. org/abstract/document/9596007 .Yao, Z. and Liu, X. A CNN-Transformer Deep Learning Model for Real-time Sleep Stage Classi-fication in an Energy-Constrained Wireless Device 
+
+> *
+
+. In 2023 11th International IEEE/EMBS Confer-ence on Neural Engineering (NER) , pp. 1–4, Bal-timore, MD, USA, April 2023. IEEE. ISBN 978-1-66546-292-1. doi: 10.1109/NER52421.2023. 10123825. URL https://ieeexplore.ieee. org/document/10123825/ .Zhang, H., Xing, M., Wu, Y., and Zhao, C. Compiler tech-nologies in deep learning co-design: A survey. Intelligent Computing , 2:0040, 2023. Zheng, H.-S., Liu, Y.-Y., Hsu, C.-F., and Yeh, T. T. Stream-net: memory-efficient streaming tiny deep learning infer-ence on the microcontroller. Advances in Neural Infor-mation Processing Systems , 36, 2024a. Zheng, S., Liang, Y., Wang, S., Chen, R., and Sheng, K. Flextensor: An automatic schedule exploration and opti-mization framework for tensor computation on heteroge-neous system. In Proceedings of the Twenty-Fifth Interna-tional Conference on Architectural Support for Program-ming Languages and Operating Systems , pp. 859–873, 2020. Zheng, S., Chen, R., Li, M., Ye, Z., Ceze, L., and Liang, Y. vMCU: Coordinated Memory Management and Kernel Optimization for DNN Inference on MCUs. Proceed-ings of Machine Learning and Systems , 6:452–464, May 2024b. Zhu-Zhou, F., Tejera-Berengu ´e, D., Gil-Pita, R., Utrilla-Manso, M., and Rosa-Zurera, M. Computationally 10 550 551 552 553 554 555 556 557 558 559 560 561 562 563 564 565 566 567 568 569 570 571 572 573 574 575 576 577 578 579 580 581 582 583 584 585 586 587 588 589 590 591 592 593 594 595 596 597 598 599 600 601 602 603 604 
+
+> msf-CNN: Multi-Stage Fusion with Convolutional Neural Networks for TinyML
+
+constrained audio-based violence detection through transfer learning and data augmentation techniques. 
+
+Applied Acoustics , 213:109638, October 2023. ISSN 0003-682X. doi: 10.1016/j.apacoust.2023.109638. URL https://www.sciencedirect.com/ science/article/pii/S0003682X2300436X .11 605 606 607 608 609 610 611 612 613 614 615 616 617 618 619 620 621 622 623 624 625 626 627 628 629 630 631 632 633 634 635 636 637 638 639 640 641 642 643 644 645 646 647 648 649 650 651 652 653 654 655 656 657 658 659 
+
+msf-CNN: Multi-Stage Fusion with Convolutional Neural Networks for TinyML 
+
+Code Availability – The implementation of msf-CNN is publicly available. Please check the supplementary material for the URL. 
+
+# A. Analysis of the number of MAC operations 
+
+Analyzing the number of MAC operations in the fusion block is quite complex. The input tensor for each layer is sliced into overlapped tiles, and the kernel performs con-volution on the data within each tile. Here, the number of overlapped tiles N tile of each layer is 
+
+N tile = ⌊ hin + 2 p − tstile + 1 ⌋⌊ win + 2 p − kslayer + 1 ⌋, (14) where hin , w in are the height and width of input tensor, 
+
+stile , s layer are the stride of tile and layer, p represents the input padding. Recall that t, k are the tile size and kernel size respectively. And the output size of each tile is determined as: 
+
+Otile = ⌊ t − kslayer + 1 ⌋cout . (15) whereby cout is the number of output channels. We can therefore derive the number Clayer of MAC operations of a fused convolutional layer as: 
+
+Clayer = N tile × Otile × k2 × cout . (16) Finally, we can derive Cf b the total MAC operations of the entire fusion block as: 
+
+Cf b = X Clayer . (17) 12
