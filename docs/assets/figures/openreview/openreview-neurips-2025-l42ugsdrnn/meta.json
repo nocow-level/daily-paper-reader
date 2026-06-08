@@ -1,0 +1,87 @@
+{
+  "version": 2,
+  "extractor": "papercropper",
+  "figures": [
+    {
+      "url": "assets/figures/openreview/openreview-neurips-2025-l42ugsdrnn/fig-001.webp",
+      "caption": "",
+      "page": 0,
+      "index": 1,
+      "width": 623,
+      "height": 438,
+      "label": "Figure"
+    },
+    {
+      "url": "assets/figures/openreview/openreview-neurips-2025-l42ugsdrnn/fig-002.webp",
+      "caption": "",
+      "page": 0,
+      "index": 2,
+      "width": 1391,
+      "height": 368,
+      "label": "Figure"
+    },
+    {
+      "url": "assets/figures/openreview/openreview-neurips-2025-l42ugsdrnn/fig-003.webp",
+      "caption": "",
+      "page": 0,
+      "index": 3,
+      "width": 646,
+      "height": 400,
+      "label": "Figure"
+    },
+    {
+      "url": "assets/figures/openreview/openreview-neurips-2025-l42ugsdrnn/fig-004.webp",
+      "caption": "",
+      "page": 0,
+      "index": 4,
+      "width": 660,
+      "height": 390,
+      "label": "Figure"
+    },
+    {
+      "url": "assets/figures/openreview/openreview-neurips-2025-l42ugsdrnn/fig-005.webp",
+      "caption": "",
+      "page": 0,
+      "index": 5,
+      "width": 660,
+      "height": 392,
+      "label": "Figure"
+    },
+    {
+      "url": "assets/figures/openreview/openreview-neurips-2025-l42ugsdrnn/fig-006.webp",
+      "caption": "",
+      "page": 0,
+      "index": 6,
+      "width": 656,
+      "height": 396,
+      "label": "Figure"
+    },
+    {
+      "url": "assets/figures/openreview/openreview-neurips-2025-l42ugsdrnn/fig-007.webp",
+      "caption": "",
+      "page": 0,
+      "index": 7,
+      "width": 648,
+      "height": 400,
+      "label": "Figure"
+    },
+    {
+      "url": "assets/figures/openreview/openreview-neurips-2025-l42ugsdrnn/fig-008.webp",
+      "caption": "",
+      "page": 0,
+      "index": 8,
+      "width": 1345,
+      "height": 509,
+      "label": "Figure"
+    },
+    {
+      "url": "assets/figures/openreview/openreview-neurips-2025-l42ugsdrnn/fig-009.webp",
+      "caption": "",
+      "page": 0,
+      "index": 9,
+      "width": 1334,
+      "height": 561,
+      "label": "Figure"
+    }
+  ]
+}

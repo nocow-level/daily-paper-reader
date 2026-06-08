@@ -1,0 +1,1975 @@
+Title: 17757_Confident_or_Seek_Strong.pdf
+
+URL Source: https://openreview.net/pdf?id=smdbra3VEi
+
+Number of Pages: 22
+
+Markdown Content:
+# Confident or Seek Stronger: Exploring Uncertainty-Based Small LM Routing From Benchmarking to Generalization Anonymous Author(s) 
+
+Affiliation Address 
+
+email 
+
+## Abstract 
+
+Small language models (SLMs) are increasingly deployed on edge devices for 1
+
+personalized applications, offering efficient decoding latency and reduced energy 2
+
+consumption. However, these SLMs often generate inaccurate responses when han-3
+
+dling complex queries. One promising solution is uncertainty-based SLM routing, 4
+
+offloading high-stakes queries to stronger large language models (LLMs) when 5
+
+resulting in low-confidence responses on SLM. This follows the principle of If 6
+
+you lack confidence, seek stronger support to enhance reliability. Relying on more 7
+
+powerful LLMs is yet effective but increases invocation costs. Therefore, striking 8
+
+a routing balance between efficiency and efficacy remains a critical challenge. 9
+
+Additionally, efficiently generalizing the routing strategy to new datasets remains 10 
+
+under-explored. In this paper, we conduct a comprehensive investigation into bench-11 
+
+marking and generalization of uncertainty-driven routing strategies from SLMs 12 
+
+to LLMs over 5000+ settings . Our findings highlight: First , uncertainty-correctness 13 
+
+alignment in different uncertainty quantification (UQ) methods significantly im-14 
+
+pacts routing performance. Second , uncertainty distributions depend more on both 15 
+
+the specific SLM and the chosen UQ method, rather than on downstream data. 16 
+
+Building on the insight, we propose a proxy routing data construction pipeline and 17 
+
+open-source a hold-out set to enhance the generalization on predicting the routing 18 
+
+curve for new downstream data. Experimental results indicate that proxy routing 19 
+
+data effectively bootstraps routing performance without any new data. The source 20 
+
+code is available at https://anonymous.4open.science/r/quodlibeta .21 
+
+## 1 Introduction 22 
+
+Large language models (LLMs) deployment on edge devices has gained increasing attention in 23 
+
+recent years, primarily due to their potential for low-latency, privacy-preserving inference. Given 24 
+
+the computational and memory constraints of edge devices, small language models (SLMs) (e.g., 25 
+
+Phi2-mini [ 35 ] or Llama3.2-3B [ 70 ] are designed for resource-efficient deployment, particularly on 26 
+
+devices such as smartphones and wearable devices. Their overarching goal is to democratize the 27 
+
+deployment of LMs, making it accessible and affordable to users across diverse settings and at any 28 
+
+time [ 52 , 86 , 83 ]. However, these SLMs often lack the robustness and scalability of LLMs [ 8] (e.g., 29 
+
+GPT-4o [ 2] and Llama-3.1-405B), especially when faced with diverse and complex input queries 30 
+
+under the deployment on edge devices, which eventually degrade the overall performance. This 31 
+
+limitation raises a critical need for exploring solutions to increase the response reliability of SLMs. 32 
+
+To mitigate this unreliability, a line of work proposes to partially offload challenging and complex 33 
+
+queries from SLMs to LLMs [ 11 , 59 , 32 , 66 ]. A hybrid system is then established to wisely route 34 
+
+the queries from SLMs and seek more reliable and deterministic responses from stronger LLMs. 35 
+
+Submitted to 39th Conference on Neural Information Processing Systems (NeurIPS 2025). Do not distribute. Table 1: Uncertainty quantification (UQ) methods evaluated in our benchmark. “Model Access” specifies whether a method views the LM’s weights/logits (white-box) or only its generated output (black-box). “Require Training?” indicates if additional training is needed. See Subsection 2.1 for taxonomy details and Subsection 3.1 for method descriptions. Uncertainty Quantification (UQ) Methods Taxonomy Model Access Require Training? Average Token Prob [53] Token/sequence probabilities White-box No                       
+
+> p(True )[39] Token/sequence probabilities White-box No Perplexity [21] Token/sequence probabilities White-box No Jaccard Degree [47] Output consistency Black-box No Verbalization-1s [76, 69] Verbalized uncertainty Black-box No Verbalization-2s [69] Verbalized uncertainty Black-box No Trained Probe [4, 39, 53] Uncertainty probe White-box Yes OOD Probe [39, 53] Uncertainty probe White-box Yes
+
+Although LLMs can exhibit superior performance, they incur high maintenance and inference costs 36 
+
+given the large scale of model size and their infrastructure (i.e., a single NVIDIA A 100 GPU can 37 
+
+cost approximately $2,000 per month for deployment). Inaccurate routing by SLMs increases the 38 
+
+volume of queries forwarded to LLMs, necessitating greater bandwidth allocation for maintaining 39 
+
+the service of LLMs. As a result, operational costs and budgetary requirements rise accordingly, 40 
+
+especially when continuous deployment is required. Hence, developing an effective routing strategy 41 
+
+is crucial for fully deploying SLMs [ 59 , 66 , 11 ], as it both enhances response reliability and reduces 42 
+
+the costs associated with services and data transmission. 43 
+
+Leveraging SLMs’ self-uncertainty estimation emerges as a robust strategy for enhancing routing 44 
+
+effectiveness [ 11 , 16 ]. By relying on the self-assessed uncertainty, the system can better decide 45 
+
+whether to handle a query locally or delegate it to a larger model without the aid of extra routers, 46 
+
+ensuring that only queries deemed unreliable by the SLMs are routed to LLMs. As a result, the 47 
+
+uncertainty-based routing approach not only generalizes well to new datasets, as only self-assessed 48 
+
+information from SLM is needed, but it also reduces the high operational costs associated with 49 
+
+accurately running LLMs. To this end, we aim to explore two open and nontrivial research questions 50 
+
+for uncertainty-based SLM routing: 51 
+
+1) What is the best practice of uncertainty estimation for query routing from SLMs to LLMs? 52 
+
+In this research question, we benchmark the uncertainty-correctness alignment of each uncertainty 53 
+
+quantification (UQ) method under its impact on SLM routing. A good alignment is a key factor for 54 
+
+successful routing decisions, as any misalignment can cause unnecessary offloading with extra cost. 55 
+
+However, SLMs may struggle to provide reliable uncertainty estimates [ 33 , 15 , 73 ], making them 56 
+
+less effective as indicators for query routing. Thus, we benchmark the alignment between uncertainty 57 
+
+and correctness, paving the insights for establishing more effective routing strategies 1 .58 
+
+2) What is the best practice to initially establish an effective routing strategy when generalizing 59 
+
+to new datasets? In this research question, we explore how to generalize routing strategies to new 60 
+
+datasets. Existing approaches [ 59 , 32 ] rely on sufficient new downstream data to make routing 61 
+
+decisions for optimal performance-cost trade-offs, but this process is time-consuming and labor-62 
+
+intensive. Broadly speaking, collecting and analyzing full downstream datasets under varying 63 
+
+SLM configurations can be prohibitively costly, delaying implementation, which is not practical 64 
+
+in real-world scenarios. This delay is particularly problematic in high-stakes scenarios, such as 65 
+
+medical wearable devices, where reliability is critical, and inaccuracies are unacceptable even in early 66 
+
+deployment stages. Based on our findings, we provide a data construction pipeline to predict the 67 
+
+routing curves in new downstream scenarios without any new downstream data. A generated proxy 68 
+
+routing dataset as a data-agnostic hold-out set enables the estimation of effective routing decisions 69 
+
+via the predicted routing curves. We further benchmark the benefits of this proxy routing dataset, 70 
+
+demonstrating its generalization ability in predicting the routing curve to new datasets. 71 
+
+This work offers an accessible and reproducible pipeline for uncertainty-based routing from bench-72 
+
+marking to generalization. Our main contributions are summarized as follows: 73  
+
+> 1For the convenience of writing, we interchangeably use uncertainty and confidence, where low uncertainty refers to high confidence.
+
+2• Comprehensive benchmarking and detailed analysis: This benchmark evaluates 8 UQ methods 74 
+
+across 14 datasets to examine the alignment between uncertainty and correctness in routing tasks. 75 
+
+We incorporate 8 SLMs and 2 LLMs to emulate real-world deployment scenarios. We then 76 
+
+delve into key observations from the extensive results and conclude the insights for developing 77 
+
+uncertainty-based SLM routing. 78 
+
+• Proxy routing data for generalizing routing to new data: Building on our benchmarking 79 
+
+pipeline, we introduce a proxy routing data construction pipeline designed to generalize the routing 80 
+
+curve prediction in new downstream scenarios. Empirical results show that this proxy routing 81 
+
+data generalizes effectively the routing prediction to new datasets without relying on any new 82 
+
+downstream data .83 
+
+## 2 Reviewing Different Schools of Uncertainty Quantification and LLM 84 
+
+## Routing 85 
+
+2.1 Uncertainty Quantification for LMs 86 
+
+Uncertainty quantification methods estimate a model’s confidence in its predictions [ 31 ]. For 87 
+
+traditional classification and regression, uncertainty estimation is well-established [ 23 ]. However, for 88 
+
+LLMs generating free-form responses to complex queries, estimating uncertainty is more challenging 89 
+
+because the output space can grow exponentially with vocabulary size, and each sequence spans 90 
+
+multiple tokens [ 20 ]. Existing uncertainty quantification approaches for LLMs can be grouped into 91 
+
+the following four categories. 92 
+
+Via verbalizing uncertainty. This line of work prompts language models to report linguistic con-93 
+
+fidence [ 53 , 56 ]. To enable LMs to verbalize confidence, researchers have proposed fine-tuning 94 
+
+them to express uncertainty [ 46 ] or teaching them to verbalize confidence through in-context learn-95 
+
+ing [ 17 ]. Verbalized confidence can take the form of linguistic expressions of uncertainty or numer-96 
+
+ical scores [ 24 ]. Multiple studies find that LLMs tend to be overconfident when reporting confi-97 
+
+dence [ 76 , 69 ]. To mitigate this overconfidence, prompting strategies such as multi-step elicitation, 98 
+
+top- k , and Chain-of-Thought [ 72 ] have been explored [ 69 ]. Sampling multiple response-confidence 99 
+
+pairs and designing more effective aggregation strategies can also help mitigate overconfidence [ 76 ]. 100 
+
+Moreover, [ 69 ] reports that verbalized confidence is typically better calibrated than the model’s 101 
+
+conditional probabilities. 102 
+
+Via analyzing token/sequence probabilities. This line of research derives confidence scores from 103 
+
+model logits for output tokens [ 24 , 33 , 38 ]. The confidence of a generated sequence is computed by 104 
+
+aggregating the log-probabilities of its tokens. Common aggregation strategies include arithmetic 105 
+
+average, minimum, perplexity, and average entropy [ 20 , 21 , 71 ]. Because not all tokens in a sequence 106 
+
+equally reflect semantic content, SAR reweights token likelihoods to emphasize more meaningful 107 
+
+tokens [ 18 ]. However, different surface realizations of the same claim can yield different probabilities, 108 
+
+implying that the calculated confidence reflects how a claim is articulated rather than the claim 109 
+
+itself [ 53 ]. To combine LM self-assessment with token probabilities, p(True ) is proposed: the model 110 
+
+is asked whether its generated response is correct, and the probabilities of True/False tokens serve as 111 
+
+the confidence score [39, 69]. 112 
+
+Via gauging output consistency. This line of research (e.g., SelfCheckGPT [ 54 ]) assumes that 113 
+
+high-confidence LLMs produce consistent outputs [ 53 ]. A typical approach samples m responses 114 
+
+for a given input query, measures inter-response similarity, and calculates a confidence score from 115 
+
+meaning diversity [ 20 ]. Common ways to measure pairwise similarity include Natural Language 116 
+
+Inference (NLI) and Jaccard similarity [ 24 ]. Consistency is then assessed by analyzing the similarity 117 
+
+matrix, for instance, by counting semantic sets, summing eigenvalues of the graph Laplacian or 118 
+
+computing eccentricity [ 47 ]. Because different sentences can express the same meaning, semantic 119 
+
+entropy [40] first clusters responses by semantic equivalence before measuring consistency. 120 
+
+Via training uncertainty probes. This approach trains classifiers to predict whether an LLM 121 
+
+will arrive at the correct answer for a particular query, using predicted probabilities as confidence 122 
+
+scores [ 24 ]. Training data is often obtained by sampling multiple answers per question at a fixed 123 
+
+temperature and labeling each for correctness [ 39 ]. A probe (commonly a multi-layer perceptron) 124 
+
+then takes hidden states as inputs to predict correctness [ 4 , 42 ]. Because in-domain training data 125 
+
+is not always available, Contrast-Consistent Search trains probes unsupervisedly by maximizing 126 
+
+3Figure 1: The ROC AUC scores measure the alignment between confidence and correctness across different SLMs and uncertainty quantification methods on OpenBookQA. A higher ROC AUC indicates a stronger alignment. representation distances between contradictory answers on Yes/No questions [ 7]. Furthermore, 127 
+
+whether probes trained on out-of-distribution data remain effective is still under debate [39, 53, 40]. 128 
+
+2.2 LLM Routing 129 
+
+In query-routing scenarios, recent approaches train additional classifiers to direct queries to different 130 
+
+SLMs or LLMs based on historical performance metrics and user feedback data [ 16 , 59 , 66 , 37 ,131 
+
+84 ]. For instance, RouterBench [ 32 ] collects inference outputs from selected LLMs to aid in 132 
+
+the development of routing classifiers. However, these methods face significant challenges when 133 
+
+encountering new downstream tasks, as such data falls outside the distribution of the existing training 134 
+
+data. This limitation makes them less practical for real-world scenarios, such as on personal edge 135 
+
+device deployment, where adaptability to unseen conditions is crucial. Our work focuses on how to 136 
+
+establish routing systems between SLMs and LLMs and generalize to new downstream tasks. In 137 
+
+this manner, uncertainty-based routing is an appropriate solution to overcome these challenges, as 138 
+
+uncertainty is directly extracted from SLMs themselves. Furthermore, we propose a proxy routing 139 
+
+data construction pipeline to initialize a routing system that generalizes to unseen datasets. 140 
+
+## 3 Benchmarking Uncertainty-based SLM Routing 141 
+
+In this section, we systematically evaluate 12 SLMs and 4 LLMs on 15 datasets using 8 UQ methods 142 
+
+(see Table 1) for uncertainty-based SLM routing. This section details the datasets, models, and 143 
+
+UQ methods, followed by several key findings and practical considerations. All experiments are 144 
+
+conducted on four 80 GB NVIDIA A 100 GPUs. 145 
+
+3.1 Benchmark Coverage and Setup 146 
+
+Language Models. We evaluate 12 open -source SLMs, organized into three categories: 147 
+
+non - reasoning LMs, reasoning LMs, and a recurrent neural network (RNN) model. The non -reasoning 148 
+
+models are Llama - 3.2 -1B - Instruct [ 55 ], Llama - 3.2 - 3B -Instruct [ 55 ], Phi - 3.5 - mini - instruct [ 1], 149 
+
+Mistral - 7B - Instruct - v0.3 [ 36 ], Qwen2.5 -7B - Instruct [ 78 ], Llama - 3.1 - 8B -Instruct [ 19 ], and 150 
+
+Granite - 3.1 - 8B - Instruct [ 26 ]. The reasoning models are Qwen3 - 0.6B, Qwen3 - 1.7B, Qwen3 - 4B, 151 
+
+and Phi - 4 -mini -reasoning [ 77 ]. The RNN model is RWKV - 7 -2.9B [ 61 ]. These SLMs come from 152 
+
+Alibaba (four models), Meta (three), Microsoft, Mistral AI, IBM, and LF AI & Data. Except for 153 
+
+RWKV -7 -2.9B, all adopt decoder - only Transformer architectures and are available on Hugging Face. 154 
+
+We also include four LLMs: three open -source models—Llama - 3.1 -70B - Instruct [ 19 ], Qwen3 -32B, 155 
+
+and DeepSeek - R1 [ 29 ]—and one proprietary API model, GPT -4.1 mini [ 34 ]. Qwen3 -32B and 156 
+
+DeepSeek-R1 are reasoning LLMs, whereas Llama-3.1-70B and GPT-4.1 mini are non-reasoning. 157 
+
+Datasets. Experiments span 15 datasets from four domains: (1) Mathematical Reasoning (AQuA [ 48 ], 158 
+
+GSM8K [ 13 ], MultiArith [ 63 ], SVAMP [ 60 ], MATH-500 [ 43 ]), (2) Commonsense Reasoning 159 
+
+(CommonsenseQA [ 67 ], HellaSwag [ 80 ], OpenBookQA [ 57 ], PIQA [ 6], TruthfulQA [ 45 ], Wino-160 
+
+Grande [ 64 ], BoolQ [ 12 ], Social IQa [ 65 ]), (3) Conversational and Contextual Understanding 161 
+
+4(a) Phi-3.5-mini (b) Mistral-7B (c) Qwen3-1.7B (d) Qwen3-4B    
+
+> (e) Phi-3.5-mini (f) Mistral-7B (g) Qwen3-1.7B (h) Qwen3-4B
+
+Figure 2: Overall accuracy vs. routing ratio with different UQ methods and SLMs. (a)-(d) show the results of routing to DeepSeek-R1 on the CommonsenseQA dataset; and (e)-(h) demonstrate the results of routing to GPT-4.1 mini on the OpenBookQA dataset. (CoQA [ 62 ]), and (4) Problem Solving (MMLU [ 30 ]). These cover free-form, multiple-choice, and 162 
+
+True/False question answering and are available via Hugging Face. Table 2 in Appendix A provides 163 
+
+further details. 164 
+
+UQ Methods and Hyperparameters. We evaluate 8 approaches from the four categories in 165 
+
+Section 2.1. (1) Average token probability uses the probability of the chosen option token (e.g., “A”) 166 
+
+for multiple-choice tasks or the mean probability of all generated tokens for free-form tasks. (2) 167 
+
+Perplexity is computed for a sequence of N output tokens {y i } Ni=1 with probabilities {p(y i )}Ni=1 as 168 
+
+exp ( 1
+
+> N
+
+∑ Ni=1 ln p(y i )) , and its reciprocal serves as the confidence score. (3) p(True ) is a method 169 
+
+where the LM first outputs an answer, then evaluates the generated response using only “True” or 170 
+
+“False.” The probabilities for these two tokens are normalized to sum to 1, and the probability of 171 
+
+“True” is used as confidence. (4) Verbalized confidence in a single response (denoted as verbalization-172 
+
+1s) prompts the model to output both the answer and numeric confidence in one step. (5) Verbalized 173 
+
+confidence in the second round (denoted as verbalization-2s) obtains the confidence in a separate, 174 
+
+follow-up query after the model has provided an answer. (6) The degree matrix (denoted as jaccard-175 
+
+degree) generates m = 5 samples (temperature 1.0) for one query, computes pairwise Jaccard 176 
+
+similarities, and sets confidence to trace( mI → D)/m 2 , where D is the degree matrix. (7) Trained 177 
+
+probe is a four-layer MLP with LeakyReLU activations, trained on a fixed subsample of the in-domain 178 
+
+training set for each dataset, taking as input the hidden states from the eighth-to-last transformer 179 
+
+layer. We train for 20 epochs (learning rate 5 ↑ 10 →4 ). (8) Trained probe on out-of-distribution data 180 
+
+(denoted as ood-probe) is identical in architecture but trained on all other datasets. e.g., if AQuA is 181 
+
+evaluated, the ood-probe is trained on the remaining 14 datasets ( 20 epochs, learning rate 1 ↑ 10 →4 ). 182 
+
+For verbalization-based methods, we discard queries when the model does not follow instructions 183 
+
+to produce a confidence score. For free-form question answering, we use GPT-4.1 mini to evaluate 184 
+
+whether a response is essentially equivalent to the ground truth answer [85]. 185 
+
+3.2 Report Observations 186 
+
+In this section, we present our benchmarking results analyzing the impact of uncertainty-correctness 187 
+
+alignment on routing tasks. More observations and experimental results on proxy routing and routing 188 
+
+can be found in Appendix C.1. 189 
+
+Observation ✁ : Uncertainty estimation in SLMs may exhibit misalignment with prediction 190 
+
+correctness. From the theoretical perspective, well-calibrated uncertainty scores do not necessarily 191 
+
+5(a) Granite-3.1-8B (b) Qwen3-0.6B (c) Llama-3.2-1B (d) RWKV-7-2.9B Figure 3: Relative accuracy of SLMs vs. LLMs on top- k% confident queries. “Relative accuracy” is the ratio of SLM accuracy to LLM accuracy. The x-axis “Lowest Conf. Excluded” shows the percentage of low-confidence queries removed; for example, 80 means 80% of queries with the lowest confidence are excluded, leaving the top 20%. (a) and (b) compare SLMs to Llama-3.1-70B on GSM8K, while (c) and (d) compare SLMs to Qwen3-32B on BoolQ.  
+
+> (a) Phi-3.5-mini (b) Llama-3.1-8B
+
+Figure 4: Confidence distributions across 15 datasets. The histogram depicts the aggregated distribu-tion from all datasets, while each curve represents a single dataset. (a) Confidence of Phi-3.5-mini by OOD Probe; (b) Confidence of Llama-3.1-8B by Perplexity. imply a strong correlation with the correctness of the predictions [ 33 , 11 ]. The predictions of 192 
+
+models might be perfectly calibrated yet still display relatively low accuracy (i.e., confidently provide 193 
+
+wrong answers). This phenomenon is also evident in our benchmark results (illustrated in Figure 1). 194 
+
+We compute AUC scores to quantify the correlation between extracted uncertainty and prediction 195 
+
+correctness, treating correctness as a binary ground truth and using confidence values as the ranking 196 
+
+metric. The results show that not all UQ methods effectively exhibit a strong alignment between 197 
+
+confidence and prediction correctness. Moreover, from Figure 1 and Figure 8, we can observe 198 
+
+that the alignment may vary across datasets for the same SLM and UQ method. For instance, 199 
+
+Perplexity [ 21 ] demonstrates strong alignment for Phi-3.5-mini on the MultiArith dataset but fails 200 
+
+on the OpenBookQA dataset. On the other hand, OOD Probe, Trained Probe, and Perplexity obtain 201 
+
+consistently decent alignment compared to other UQ methods across different SLMs and domains of 202 
+
+datasets. Conversely, we notice that verbalization-based methods, namely verbalization-1s [ 69 , 53 ], 203 
+
+and verbalization-2s [ 69 ], consistently withhold low alignment between uncertainty and prediction 204 
+
+correctness. More experimental results can be found in Appendix C.1. 205 
+
+Observation ✂ : Verbalization-based UQ methods struggle to extract uncertainty in SLMs for 206 
+
+query routing. We find that verbalization methods like verbalization-2s [ 69 ] obtain poor alignment 207 
+
+between confidence and prediction correctness, and this misalignment can lead to inferior routing 208 
+
+performance in SLMs, where the conclusion can be found in Figure 2. Recent advancements [ 75 , 79 ]209 
+
+also show that uncertainty scores derived from verbalization may exhibit good reflection on models’ 210 
+
+intrinsic uncertainty of prediction across multiple models and datasets. This discrepancy poses a 211 
+
+significant challenge for establishing effective routing performance since queries that are actually 212 
+
+correct may be unnecessarily routed from SLMs to LLMs, thereby increasing the overall cost of 213 
+
+deploying routing systems. 214 
+
+Observation ✃: A good routing standard highly depends on UQ methods with good uncertainty-215 
+
+correctness alignment. A notable phenomenon occurs when UQ methods, such as Trained Probe [ 53 ], 216 
+
+exhibit strong alignment, leading to significant improvements in routing performance. This is because 217 
+
+6(e) Mistral -7B (g) Phi -4-mini -reasoning (f) Qwen3 -0.6B (g) RWKV -7-2.9B         
+
+> (a) Mistral -7B (b) Qwen3 -0.6B (c) Phi -4-mini -reasoning (d) RWKV -7-2.9B
+> (e) Mistral -7B (g) Phi -4-mini -reasoning (f) Qwen3 -0.6B (g) RWKV -7-2.9B
+> (a) Mistral -7B (b) Qwen3 -0.6B (c) Phi -4-mini -reasoning (d) RWKV -7-2.9B
+
+Figure 5: Routing results from four SLMs to Llama - 3.1 - 70B on HellaSwag, with the remaining 14 other datasets constituting the proxy routing data.                
+
+> (e) Mistral -7B (g) Phi -4-mini -reasoning (f) Qwen3 -0.6B (g) RWKV -7-2.9B
+> (a) Mistral -7B (b) Qwen3 -0.6B (c) Phi -4-mini -reasoning (d) RWKV -7-2.9B
+> (e) Mistral -7B (g) Phi -4-mini -reasoning (f) Qwen3 -0.6B (g) RWKV -7-2.9B
+> (a) Mistral -7B (b) Qwen3 -0.6B (c) Phi -4-mini -reasoning (d) RWKV -7-2.9B
+> (e) Mistral -7B (g) Phi -4-mini -reasoning (f) Qwen3 -0.6B (g) RWKV -7-2.9B
+> (a) Mistral -7B (b) Qwen3 -0.6B (c) Phi -4-mini -reasoning (d) RWKV -7-2.9B
+
+Figure 6: Routing results from four SLMs to DeepSeek - R1 on AQuA (mathematical reasoning), with eight commonsense -reasoning datasets and one conversational & contextual understanding dataset constituting the proxy routing data, demonstrate the strong generalization capability of the proxy routing data in predicting the routing curve. the extracted uncertainty scores from these UQ methods more effectively indicate whether SLMs 218 
+
+produce correct predictions. Among all UQ methods evaluated for routing tasks, we find that Trained 219 
+
+Probe [ 53 ], OOD Probe [ 39 , 53 ], and Perplexity [ 20 ] consistently rank as the top three methods for 220 
+
+SLM routing. Therefore, a comprehensive analysis of UQ methods before deploying a routing system 221 
+
+in SLMs is highly recommended to ensure efficient query routing. 222 
+
+Observation ✄: SLMs can match LLM performance on high-confidence queries. Although SLMs 223 
+
+generally underperform LLMs, we find that for queries where SLMs exhibit high confidence, their 224 
+
+accuracy approaches that of LLMs. To illustrate, we progressively remove queries starting from those 225 
+
+with the lowest SLM confidence and compute the ratio of SLM to LLM accuracy on the remaining 226 
+
+top- k% queries (Figure 3). As more low-confidence queries are excluded, SLMs achieve comparable 227 
+
+performance to LLMs. For instance, on GSM8K, Qwen3-0.6B achieves performance nearly equal 228 
+
+to Llama-3.1-70B on the top 20% highest-confidence queries. Moreover, the effectiveness of this 229 
+
+selection depends on the uncertainty quantification (UQ) method: approaches with stronger alignment 230 
+
+(e.g., Trained Probe [ 53 ]) yield higher relative accuracy than weaker ones (e.g., verbalization-2s) 231 
+
+across all query exclusion rates. Additional results appear in Appendix C.2. 232 
+
+## 4 Generalizable SLM Routing for New Downstream Scenarios 233 
+
+In this section, we first describe the pipeline for constructing proxy routing data with experimental 234 
+
+details. We then investigate how well the proxy routing data can predict the routing curve for new 235 
+
+downstream scenarios without accessing the new datasets. Finally, we discuss our results and offer 236 
+
+several insights into the proxy routing data for establishing routing in early-stage deployments. 237 
+
+4.1 Proxy Routing Data Construction Pipeline 238 
+
+We aim to evaluate the effectiveness of proxy routing data in generalizing the routing curve predictions 239 
+
+to new downstream scenarios, without relying on additional downstream data. Specifically, the proxy 240 
+
+routing data serves as a data-agnostic hold-out set tailored to a particular SLM, which can generalize 241 
+
+its routing standards across various new downstream datasets. By leveraging this proxy routing data, 242 
+
+we establish a generalizable routing framework for the routing deployments in the new scenario. 243 
+
+7Algorithm 1 Proxy Routing Data Construction Pipeline 
+
+input A collection of datasets D = {D i } Ni=1 with N domains 
+
+output A set of proxy routing data X 
+
+> 1:
+
+Collect diverse domain of dataset D i to form D = {D i }Ni=1  
+
+> 2:
+
+Generate uncertainty distributions {F D } Mi=1 of D with selected UQ methods 3: Sample X = {x j | x j ↓ X i ↔ {F D } Mi=1 ↗i, j } from i-th bin in {F D }Mi=1 
+
+This approach simplifies deployment of routing systems by eliminating the need for dataset-specific 244 
+
+routing analysis and demonstrates that proxy routing data can generalize across diverse datasets. 245 
+
+The overall construction pipeline is detailed as follows. Let D = {D i }Ni=1 be a diverse collection 246 
+
+of datasets, where N denotes the number of distinct domain types included in the collection. We 247 
+
+select a diverse collection of datasets D with various domains, such as commonsense reasoning, 248 
+
+mathematics, and more, where we follow the settings in [ 50 ]. And then, we process every data 249 
+
+instance in D through selected UQ methods to capture their corresponding uncertainty distributions 250 
+
+{F D }Mi=1 with M bins, where M ↓ Z + is an arbitrary number. These distributions serve as the 251 
+
+sampling foundation of each data instance in forming proxy routing data. Finally, data instances 252 
+
+obtained in the set of proxy routing data X are weighted-sampled from each bin of {F D }Mi=1 such 253 
+
+that X = {x j | x j ↓ X i ↔ {F D }Mi=1 ↗i, j }. This ensures similar distribution in proxy routing data 254 
+
+across various uncertainty levels presented in {F D }Mi=1 . The resulting collection of these sampled 255 
+
+data instances forms the final proxy routing dataset. The detailed pipeline of constructing the proxy 256 
+
+routing dataset is outlined in Algorithm 1. 257 
+
+4.2 Proxy Routing Data Setups 258 
+
+Benchmark Settings. We evaluate the constructed proxy routing data on 15 SLMs and 4 LLMs 259 
+
+across 15 datasets. Based on the observations and results from the previous benchmark section, 260 
+
+we select 2 UQ methods that demonstrate the strongest alignment between predicted uncertainty 261 
+
+and actual correctness: "OOD Probe" [ 39 , 53 ] and "Perplexity" [ 20 ] method. We consider the 262 
+
+routing performance evaluated on the entire new dataset as the ground truth. To simulate new dataset 263 
+
+scenarios, we introduce two evaluation settings: (1) fully out-of-domain and (2) partially in-domain. 264 
+
+First, for the out-of-domain setting, we evaluate a target dataset using proxy routing data derived from 265 
+
+source datasets with no domain overlap. Second, in the partially in-domain setting, we designate one 266 
+
+dataset as the target and construct its proxy routing data using the remaining 14 datasets, where the 267 
+
+domain of the dataset may partially overlap. The target dataset’s generalization performance is then 268 
+
+evaluated using this proxy routing set, which does not contain any information from the target dataset. 269 
+
+All reported results represent the average across three individual experimental runs. 270 
+
+Data Construction Settings. The proxy routing data is weighted-sampled from each bin of the proxy 271 
+
+routing data distributions, with the number of bins set to 30 . We sample 10% of the instances from 272 
+
+each bin to form the final proxy routing data. The temperature is fixed at 0 with a fixed random seed 273 
+
+of 50 to ensure reproducibility. 274 
+
+4.3 Routing Curve Prediction with Proxy Routing Data 275 
+
+We provide several key insights into the generalization ability of proxy routing data as follows. 276 
+
+Insights ✁: The extracted confidence distribution is predominantly determined by the chosen 277 
+
+SLM and uncertainty quantification (UQ) method, with minimal dependence on the downstream 278 
+
+dataset. As illustrated in Figure 4, confidence scores aggregated from 15 different tasks exhibit a 279 
+
+nearly identical shape regardless of the specific dataset. Instead, they vary notably with different 280 
+
+SLMs and UQ methods. This finding suggests that the confidence distribution is largely data-agnostic, 281 
+
+enabling the construction of proxy routing data that generalizes to new tasks without any new datasets. 282 
+
+Insights ✂ : Proxy routing data helps SLM routing to predict an accurate routing curve without 283 
+
+any new data, allowing routing strategies to be initialized on SLMs without accessing new 284 
+
+datasets. Building on our findings about uncertainty distributions, we sampled a data subset to create 285 
+
+a final proxy routing dataset using the pipeline described in Section 4.1. We then utilized this proxy 286 
+
+routing dataset to predict all thresholds for different routing ratios in new downstream scenarios. 287 
+
+8The experimental results (see Figure 5 and Figure 6) show that the routing curves from the proxy 288 
+
+routing data closely match those from the entire new downstream dataset in both evaluation settings, 289 
+
+indicating that the proxy routing data provides strong capability for establishing routing strategies on 290 
+
+unseen downstream datasets. An identical phenomenon is observed across multiple UQ methods and 291 
+
+different SLMs, highlighting the potential of proxy routing data to initiate the routing process for any 292 
+
+new dataset, independent of the UQ method or SLM used. More results are in Appendix C.3. 293 
+
+## 5 Challenges and Opportunities 294 
+
+✁ How to cash-in routing efficiency on new edge devices? Based on the benchmark results, proxy 295 
+
+routing data provides a robust foundation for establishing routing policies on new edge devices 296 
+
+without accessing prior knowledge at the early stage of deployment. This enables the routing 297 
+
+policies with strong generalization to new dataset scenarios and enhances the efficiency across diverse 298 
+
+deployments for personal edge devices. While proxy routing data holds a good performance in the 299 
+
+early deployment stage, an important direction to explore is how to effectively leverage additional 300 
+
+private on-device data to strengthen the quality of proxy routing data, aiming to continuously enhance 301 
+
+the deployment of personalized routing strategies. With the aid of proxy routing data, less private 302 
+
+data is required, but striking a balance between privacy and performance remains an open challenge. 303 
+
+✂ How to effectively strike a balance between LLM routing efficiency and utility? We em-304 
+
+pirically observe that by leveraging UQ methods with strong uncertainty-utility alignment (e.g., 305 
+
+Perplexity and OOD Probe methods), routing thresholds can effectively be determined with the sweet 306 
+
+points of efficiency and utility. However, achieving such sweet spots can be challenging due to the 307 
+
+variability in downstream datasets and the sensitivity of UQ methods to LLM-specific characteristics. 308 
+
+Additionally, discrepancies across different device types, such as variations between iOS and Android 309 
+
+systems , further complicating the process, requiring tailored strategies and analytics to account for 310 
+
+platform-specific constraints and capabilities. Based on these factors, providing a fair apple-to-apple 311 
+
+comparison regarding routing performance is inherently challenging. Researchers should be mindful 312 
+
+of these complexities and focus on developing methods that are not only efficient but also capable of 313 
+
+handling long-context scenarios effectively. 314 
+
+✃ How is the performance when conducting compression (e.g., pruning, quantization) on the 315 
+
+on-device model? As with the on-device models discussed in the above sections, we directly adopt 316 
+
+a pre-trained small model without any modifications. Alternatively, on-device models can also be 317 
+
+generated by compressing larger models. Specifically, numerous works have explored methods for 318 
+
+compressing LLMs into smaller sizes using techniques such as pruning [ 22 ] and quantization [ 74 , 44 ]. 319 
+
+The advantage of employing compression methods is that the smaller models compressed from larger 320 
+
+ones tend to retain similar distributions of the output, thereby mitigating the issue of distribution shift. 321 
+
+✄ Uncertainty-aware routing in on-device multimodal language models. While LLMs typically 322 
+
+operate with a single modality for both input and output, a promising research direction involves 323 
+
+exploring uncertainty-aware routing in multimodal language models (MLLMs). For instance, in 324 
+
+vision-language models (VLMs) such as LLaVa [ 49 ] and InternVL [ 9], the inputs include both 325 
+
+images/videos and text. By incorporating visual modalities, the properties of vision tokens signif-326 
+
+icantly influence the output. As a result, the uncertainty in the generated text differs from that of 327 
+
+language-only models. Benchmarking and generalizing uncertainty-aware routing for on-device 328 
+
+MLLMs is a valuable direction for the research community. 329 
+
+## 6 Conclusion 330 
+
+This paper investigates the routing accuracy of SLMs in estimating their uncertainty and establishing 331 
+
+best practices for initiating effective routing strategies. Through comprehensive benchmarking of 15 332 
+
+SLMs, 4 LLMs, 8 UQ methods, and 15 datasets across 5000+ settings, we found that the alignment 333 
+
+between uncertainty and correctness significantly impacts routing performance. Additionally, our 334 
+
+experiments show that uncertainty distributions depend primarily on the specific SLM and UQ 335 
+
+method rather than the downstream data. Building on the insights, we introduced a proxy routing data 336 
+
+construction pipeline and a hold-out dataset to generalize routing strategies without prior knowledge 337 
+
+of new downstream data. The results confirm that the proxy routing data effectively bootstraps 338 
+
+routing, indicating its strong potential for benefiting in resource-efficient SLM deployment. 339 
+
+9References 340 
+
+[1] Marah Abdin, Jyoti Aneja, Hany Awadalla, Ahmed Awadallah, Ammar Ahmad Awan, Nguyen 341 
+
+Bach, Amit Bahree, Arash Bakhtiari, Jianmin Bao, Harkirat Behl, et al. Phi-3 technical report: 342 
+
+A highly capable language model locally on your phone. arXiv preprint arXiv:2404.14219 ,343 
+
+2024. 344 
+
+[2] Josh Achiam, Steven Adler, Sandhini Agarwal, Lama Ahmad, Ilge Akkaya, Florencia Leoni 345 
+
+Aleman, Diogo Almeida, Janko Altenschmidt, Sam Altman, Shyamal Anadkat, et al. Gpt-4 346 
+
+technical report. arXiv preprint arXiv:2303.08774 , 2023. 347 
+
+[3] Loubna Ben Allal, Anton Lozhkov, Elie Bakouch, Leandro von Werra, and Thomas Wolf. 348 
+
+Smollm - blazingly fast and remarkably powerful, 2024. 349 
+
+[4] Amos Azaria and Tom Mitchell. The internal state of an llm knows when it’s lying. In Findings 350 
+
+of the Association for Computational Linguistics: EMNLP 2023 , pages 967–976, 2023. 351 
+
+[5] Jinze Bai, Shuai Bai, Yunfei Chu, Zeyu Cui, Kai Dang, Xiaodong Deng, Yang Fan, Wenbin Ge, 352 
+
+Yu Han, Fei Huang, et al. Qwen technical report. arXiv preprint arXiv:2309.16609 , 2023. 353 
+
+[6] Yonatan Bisk, Rowan Zellers, Jianfeng Gao, Yejin Choi, et al. Piqa: Reasoning about phys-354 
+
+ical commonsense in natural language. In Proceedings of the AAAI conference on artificial 355 
+
+intelligence , volume 34, pages 7432–7439, 2020. 356 
+
+[7] Collin Burns, Haotian Ye, Dan Klein, and Jacob Steinhardt. Discovering latent knowledge in 357 
+
+language models without supervision. arXiv preprint arXiv:2212.03827 , 2022. 358 
+
+[8] Lihu Chen and Gaël Varoquaux. What is the role of small models in the llm era: A survey. 359 
+
+arXiv preprint arXiv:2409.06857 , 2024. 360 
+
+[9] Zhe Chen, Jiannan Wu, Wenhai Wang, Weijie Su, Guo Chen, Sen Xing, Muyan Zhong, Qinglong 361 
+
+Zhang, Xizhou Zhu, Lewei Lu, et al. Internvl: Scaling up vision foundation models and aligning 362 
+
+for generic visual-linguistic tasks. In Proceedings of the IEEE/CVF Conference on Computer 363 
+
+Vision and Pattern Recognition , pages 24185–24198, 2024. 364 
+
+[10] Xiangxiang Chu, Limeng Qiao, Xinyu Zhang, Shuang Xu, Fei Wei, Yang Yang, Xiaofei Sun, 365 
+
+Yiming Hu, Xinyang Lin, Bo Zhang, et al. Mobilevlm v2: Faster and stronger baseline for 366 
+
+vision language model. arXiv preprint arXiv:2402.03766 , 2024. 367 
+
+[11] Yu-Neng Chuang, Helen Zhou, Prathusha Kameswara Sarma, Parikshit Gopalan, John Boc-368 
+
+cio, Sara Bolouki, and Xia Hu. Learning to route with confidence tokens. arXiv preprint 369 
+
+arXiv:2410.13284 , 2024. 370 
+
+[12] Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and 371 
+
+Kristina Toutanova. Boolq: Exploring the surprising difficulty of natural yes/no questions. In 372 
+
+Proceedings of the 2019 Conference of the North American Chapter of the Association for 373 
+
+Computational Linguistics: Human Language Technologies, Volume 1 (Long and Short Papers) ,374 
+
+pages 2924–2936, 2019. 375 
+
+[13] Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, 376 
+
+Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, et al. Training verifiers to 377 
+
+solve math word problems. arXiv preprint arXiv:2110.14168 , 2021. 378 
+
+[14] Tri Dao and Albert Gu. Transformers are ssms: Generalized models and efficient algorithms 379 
+
+through structured state space duality. arXiv preprint arXiv:2405.21060 , 2024. 380 
+
+[15] Gianluca Detommaso, Martin Bertran, Riccardo Fogliato, and Aaron Roth. Multicalibration for 381 
+
+confidence scoring in llms. arXiv preprint arXiv:2404.04689 , 2024. 382 
+
+[16] Dujian Ding, Ankur Mallick, Chi Wang, Robert Sim, Subhabrata Mukherjee, Victor Rühle, 383 
+
+Laks VS Lakshmanan, and Ahmed Hassan Awadallah. Hybrid llm: Cost-efficient and quality-384 
+
+aware query routing. In The Twelfth International Conference on Learning Representations ,385 
+
+2024. 386 
+
+10 [17] Qingxiu Dong, Lei Li, Damai Dai, Ce Zheng, Jingyuan Ma, Rui Li, Heming Xia, Jingjing Xu, 387 
+
+Zhiyong Wu, Baobao Chang, et al. A survey on in-context learning. In Proceedings of the 2024 388 
+
+Conference on Empirical Methods in Natural Language Processing , pages 1107–1128, 2024. 389 
+
+[18] Jinhao Duan, Hao Cheng, Shiqi Wang, Alex Zavalny, Chenan Wang, Renjing Xu, Bhavya 390 
+
+Kailkhura, and Kaidi Xu. Shifting attention to relevance: Towards the predictive uncertainty 391 
+
+quantification of free-form large language models. In Proceedings of the 62nd Annual Meeting 392 
+
+of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 5050–5063, 393 
+
+2024. 394 
+
+[19] Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, 395 
+
+Aiesha Letman, Akhil Mathur, Alan Schelten, Amy Yang, Angela Fan, et al. The llama 3 herd 396 
+
+of models. arXiv preprint arXiv:2407.21783 , 2024. 397 
+
+[20] Ekaterina Fadeeva, Roman Vashurin, Akim Tsvigun, Artem Vazhentsev, Sergey Petrakov, 398 
+
+Kirill Fedyanin, Daniil Vasilev, Elizaveta Goncharova, Alexander Panchenko, Maxim Panov, 399 
+
+et al. Lm-polygraph: Uncertainty estimation for language models. In Proceedings of the 2023 400 
+
+Conference on Empirical Methods in Natural Language Processing: System Demonstrations ,401 
+
+pages 446–461, 2023. 402 
+
+[21] Marina Fomicheva, Shuo Sun, Lisa Yankovskaya, Frédéric Blain, Francisco Guzmán, Mark 403 
+
+Fishel, Nikolaos Aletras, Vishrav Chaudhary, and Lucia Specia. Unsupervised quality estimation 404 
+
+for neural machine translation. Transactions of the Association for Computational Linguistics ,405 
+
+8:539–555, 2020. 406 
+
+[22] Elias Frantar and Dan Alistarh. Sparsegpt: Massive language models can be accurately pruned 407 
+
+in one-shot. In International Conference on Machine Learning , pages 10323–10337. PMLR, 408 
+
+2023. 409 
+
+[23] Yarin Gal et al. Uncertainty in deep learning. 2016. 410 
+
+[24] Jiahui Geng, Fengyu Cai, Yuxia Wang, Heinz Koeppl, Preslav Nakov, and Iryna Gurevych. 411 
+
+A survey of confidence estimation and calibration in large language models. In Proceedings 412 
+
+of the 2024 Conference of the North American Chapter of the Association for Computational 413 
+
+Linguistics: Human Language Technologies (Volume 1: Long Papers) , pages 6577–6595, 2024. 414 
+
+[25] Xinyang Geng and Hao Liu. Openllama: An open reproduction of llama, May 2023. 415 
+
+[26] IBM Granite Team. Granite 3.0 language models, 2024. 416 
+
+[27] RLHF Griffin and Gemma Teams. Recurrentgemma: Moving past transformers for efficient 417 
+
+open language models, 2024. 418 
+
+[28] Dirk Groeneveld, Iz Beltagy, Pete Walsh, Akshita Bhagia, Rodney Kinney, Oyvind Tafjord, 419 
+
+Ananya Harsh Jha, Hamish Ivison, Ian Magnusson, Yizhong Wang, Shane Arora, David 420 
+
+Atkinson, Russell Authur, Khyathi Chandu, Arman Cohan, Jennifer Dumas, Yanai Elazar, 421 
+
+Yuling Gu, Jack Hessel, Tushar Khot, William Merrill, Jacob Morrison, Niklas Muennighoff, 422 
+
+Aakanksha Naik, Crystal Nam, Matthew E. Peters, Valentina Pyatkin, Abhilasha Ravichander, 423 
+
+Dustin Schwenk, Saurabh Shah, Will Smith, Emma Strubell, Nishant Subramani, Mitchell 424 
+
+Wortsman, Pradeep Dasigi, Nathan Lambert, Kyle Richardson, Luke Zettlemoyer, Jesse Dodge, 425 
+
+Kyle Lo, Luca Soldaini, Noah A. Smith, and Hannaneh Hajishirzi. Olmo: Accelerating the 426 
+
+science of language models. Preprint , 2024. 427 
+
+[29] Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Ruoyu Zhang, Runxin Xu, Qihao Zhu, 428 
+
+Shirong Ma, Peiyi Wang, Xiao Bi, et al. Deepseek-r1: Incentivizing reasoning capability in 429 
+
+llms via reinforcement learning. arXiv preprint arXiv:2501.12948 , 2025. 430 
+
+[30] Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and 431 
+
+Jacob Steinhardt. Measuring massive multitask language understanding. In International 432 
+
+Conference on Learning Representations , 2021. 433 
+
+[31] Bairu Hou, Yujian Liu, Kaizhi Qian, Jacob Andreas, Shiyu Chang, and Yang Zhang. Decompos-434 
+
+ing uncertainty for large language models through input clarification ensembling. In Forty-first 435 
+
+International Conference on Machine Learning , 2024. 436 
+
+11 [32] Qitian Jason Hu, Jacob Bieker, Xiuyu Li, Nan Jiang, Benjamin Keigwin, Gaurav Ranganath, 437 
+
+Kurt Keutzer, and Shriyash Kaustubh Upadhyay. Routerbench: A benchmark for multi-llm 438 
+
+routing system. arXiv preprint arXiv:2403.12031 , 2024. 439 
+
+[33] Yuheng Huang, Jiayang Song, Zhijie Wang, Shengming Zhao, Huaming Chen, Felix Juefei-Xu, 440 
+
+and Lei Ma. Look before you leap: An exploratory study of uncertainty measurement for large 441 
+
+language models. arXiv preprint arXiv:2307.10236 , 2023. 442 
+
+[34] Aaron Hurst, Adam Lerer, Adam P Goucher, Adam Perelman, Aditya Ramesh, Aidan Clark, 443 
+
+AJ Ostrow, Akila Welihinda, Alan Hayes, Alec Radford, et al. Gpt-4o system card. arXiv 444 
+
+preprint arXiv:2410.21276 , 2024. 445 
+
+[35] Mojan Javaheripi and Sébastien Bubeck. Phi-2: The surprising power of small language models, 446 
+
+December 2023. 447 
+
+[36] Albert Q. Jiang, Alexandre Sablayrolles, Arthur Mensch, Chris Bamford, Devendra Singh 448 
+
+Chaplot, Diego de las Casas, Florian Bressand, Gianna Lengyel, Guillaume Lample, Lucile 449 
+
+Saulnier, Lélio Renard Lavaud, Marie-Anne Lachaux, Pierre Stock, Teven Le Scao, Thibaut 450 
+
+Lavril, Thomas Wang, Timothée Lacroix, and William El Sayed. Mistral 7b. arXiv , 2023. 451 
+
+[37] Albert Q Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche Savary, Chris 452 
+
+Bamford, Devendra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, 453 
+
+et al. Mixtral of experts. arXiv preprint arXiv:2401.04088 , 2024. 454 
+
+[38] Zhengbao Jiang, Jun Araki, Haibo Ding, and Graham Neubig. How can we know when language 455 
+
+models know? on the calibration of language models for question answering. Transactions of 456 
+
+the Association for Computational Linguistics , 9:962–977, 2021. 457 
+
+[39] Saurav Kadavath, Tom Conerly, Amanda Askell, Tom Henighan, Dawn Drain, Ethan Perez, 458 
+
+Nicholas Schiefer, Zac Hatfield-Dodds, Nova DasSarma, Eli Tran-Johnson, et al. Language 459 
+
+models (mostly) know what they know. arXiv preprint arXiv:2207.05221 , 2022. 460 
+
+[40] Lorenz Kuhn, Yarin Gal, and Sebastian Farquhar. Semantic uncertainty: Linguistic invariances 461 
+
+for uncertainty estimation in natural language generation. arXiv preprint arXiv:2302.09664 ,462 
+
+2023. 463 
+
+[41] Teven Le Scao, Angela Fan, Christopher Akiki, Ellie Pavlick, Suzana Ili´ c, Daniel Hesslow, 464 
+
+Roman Castagné, Alexandra Sasha Luccioni, François Yvon, Matthias Gallé, et al. Bloom: A 465 
+
+176b-parameter open-access multilingual language model. 2023. 466 
+
+[42] Kenneth Li, Oam Patel, Fernanda Viégas, Hanspeter Pfister, and Martin Wattenberg. Inference-467 
+
+time intervention: Eliciting truthful answers from a language model. In Advances in Neural 468 
+
+Information Processing Systems , 2024. 469 
+
+[43] Hunter Lightman, Vineet Kosaraju, Yuri Burda, Harrison Edwards, Bowen Baker, Teddy Lee, 470 
+
+Jan Leike, John Schulman, Ilya Sutskever, and Karl Cobbe. Let’s verify step by step. In The 471 
+
+Twelfth International Conference on Learning Representations , 2023. 472 
+
+[44] Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan 473 
+
+Xiao, Xingyu Dang, Chuang Gan, and Song Han. Awq: Activation-aware weight quantization 474 
+
+for on-device llm compression and acceleration. Proceedings of Machine Learning and Systems ,475 
+
+6:87–100, 2024. 476 
+
+[45] Stephanie Lin, Jacob Hilton, and Owain Evans. Truthfulqa: Measuring how models mimic 477 
+
+human falsehoods. arXiv preprint arXiv:2109.07958 , 2021. 478 
+
+[46] Stephanie Lin, Jacob Hilton, and Owain Evans. Teaching models to express their uncertainty in 479 
+
+words. arXiv preprint arXiv:2205.14334 , 2022. 480 
+
+[47] Zhen Lin, Shubhendu Trivedi, and Jimeng Sun. Generating with confidence: Uncertainty 481 
+
+quantification for black-box large language models. arXiv preprint arXiv:2305.19187 , 2023. 482 
+
+[48] Wang Ling, Dani Yogatama, Chris Dyer, and Phil Blunsom. Program induction by rationale 483 
+
+generation: Learning to solve and explain algebraic word problems. ACL , 2017. 484 
+
+12 [49] Haotian Liu, Chunyuan Li, Qingyang Wu, and Yong Jae Lee. Visual instruction tuning. Advances 485 
+
+in neural information processing systems , 36, 2024. 486 
+
+[50] Shih-Yang Liu, Chien-Yi Wang, Hongxu Yin, Pavlo Molchanov, Yu-Chiang Frank Wang, 487 
+
+Kwang-Ting Cheng, and Min-Hung Chen. Dora: Weight-decomposed low-rank adaptation. 488 
+
+arXiv preprint arXiv:2402.09353 , 2024. 489 
+
+[51] Zechun Liu, Changsheng Zhao, Forrest Iandola, Chen Lai, Yuandong Tian, Igor Fedorov, 490 
+
+Yunyang Xiong, Ernie Chang, Yangyang Shi, Raghuraman Krishnamoorthi, et al. Mobilellm: 491 
+
+Optimizing sub-billion parameter language models for on-device use cases. arXiv preprint 492 
+
+arXiv:2402.14905 , 2024. 493 
+
+[52] Zhenyan Lu, Xiang Li, Dongqi Cai, Rongjie Yi, Fangming Liu, Xiwen Zhang, Nicholas D Lane, 494 
+
+and Mengwei Xu. Small language models: Survey, measurements, and insights. arXiv preprint 495 
+
+arXiv:2409.15790 , 2024. 496 
+
+[53] Matéo Mahaut, Laura Aina, Paula Czarnowska, Momchil Hardalov, Thomas Müller, and Lluís 497 
+
+Màrquez. Factual confidence of llms: on reliability and robustness of current estimators. arXiv 498 
+
+preprint arXiv:2406.13415 , 2024. 499 
+
+[54] Potsawee Manakul, Adian Liusie, and Mark Gales. Selfcheckgpt: Zero-resource black-box 500 
+
+hallucination detection for generative large language models. In Proceedings of the 2023 501 
+
+Conference on Empirical Methods in Natural Language Processing , pages 9004–9017, 2023. 502 
+
+[55] AI Meta. Llama 3.2: Revolutionizing edge ai and vision with open, customizable models. Meta 503 
+
+AI Blog. Retrieved December , 20:2024, 2024. 504 
+
+[56] Sabrina J Mielke, Arthur Szlam, Emily Dinan, and Y-Lan Boureau. Reducing conversational 505 
+
+agents’ overconfidence through linguistic calibration. Transactions of the Association for 506 
+
+Computational Linguistics , 10:857–872, 2022. 507 
+
+[57] Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. Can a suit of armor conduct 508 
+
+electricity? a new dataset for open book question answering. arXiv preprint arXiv:1809.02789 ,509 
+
+2018. 510 
+
+[58] Niklas Muennighoff, Luca Soldaini, Dirk Groeneveld, Kyle Lo, Jacob Morrison, Sewon Min, 511 
+
+Weijia Shi, Pete Walsh, Oyvind Tafjord, Nathan Lambert, Yuling Gu, Shane Arora, Akshita 512 
+
+Bhagia, Dustin Schwenk, David Wadden, Alexander Wettig, Binyuan Hui, Tim Dettmers, 513 
+
+Douwe Kiela, Ali Farhadi, Noah A. Smith, Pang Wei Koh, Amanpreet Singh, and Hannaneh 514 
+
+Hajishirzi. Olmoe: Open mixture-of-experts language models, 2024. 515 
+
+[59] Isaac Ong, Amjad Almahairi, Vincent Wu, Wei-Lin Chiang, Tianhao Wu, Joseph E Gonzalez, 516 
+
+M Waleed Kadous, and Ion Stoica. Routellm: Learning to route llms with preference data. 517 
+
+arXiv preprint arXiv:2406.18665 , 2024. 518 
+
+[60] Arkil Patel, Satwik Bhattamishra, and Navin Goyal. Are nlp models really able to solve 519 
+
+simple math word problems? In Proceedings of the 2021 Conference of the North American 520 
+
+Chapter of the Association for Computational Linguistics: Human Language Technologies ,521 
+
+pages 2080–2094, 2021. 522 
+
+[61] Bo Peng, Eric Alcaide, Quentin Anthony, Alon Albalak, Samuel Arcadinho, Stella Biderman, 523 
+
+Huanqi Cao, Xin Cheng, Michael Chung, Matteo Grella, et al. Rwkv: Reinventing rnns for the 524 
+
+transformer era. arXiv preprint arXiv:2305.13048 , 2023. 525 
+
+[62] Siva Reddy, Danqi Chen, and Christopher D. Manning. CoQA: A conversational question 526 
+
+answering challenge. Transactions of the Association for Computational Linguistics , 7:249–266, 527 
+
+2019. 528 
+
+[63] Subhro Roy and Dan Roth. Solving general arithmetic word problems. arXiv preprint 529 
+
+arXiv:1608.01413 , 2016. 530 
+
+[64] Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. Winogrande: An 531 
+
+adversarial winograd schema challenge at scale. Communications of the ACM , 64(9):99–106, 532 
+
+2021. 533 
+
+13 [65] Maarten Sap, Hannah Rashkin, Derek Chen, Ronan Le Bras, and Yejin Choi. Social iqa: 534 
+
+Commonsense reasoning about social interactions. In Proceedings of the 2019 Conference on 535 
+
+Empirical Methods in Natural Language Processing and the 9th International Joint Conference 536 
+
+on Natural Language Processing (EMNLP-IJCNLP) , pages 4463–4473, 2019. 537 
+
+[66] Dimitris Stripelis, Zijian Hu, Jipeng Zhang, Zhaozhuo Xu, Alay Shah, Han Jin, Yuhang Yao, 538 
+
+Salman Avestimehr, and Chaoyang He. Polyrouter: A multi-llm querying system. arXiv preprint 539 
+
+arXiv:2408.12320 , 2024. 540 
+
+[67] Alon Talmor, Jonathan Herzig, Nicholas Lourie, and Jonathan Berant. CommonsenseQA: 541 
+
+A question answering challenge targeting commonsense knowledge. In Proceedings of the 542 
+
+2019 Conference of the North American Chapter of the Association for Computational Linguis-543 
+
+tics: Human Language Technologies, Volume 1 (Long and Short Papers) , pages 4149–4158. 544 
+
+Association for Computational Linguistics, 2019. 545 
+
+[68] Omkar Thawakar, Ashmal Vayani, Salman Khan, Hisham Cholakkal, Rao Muhammad Anwer, 546 
+
+Michael Felsberg, Timothy Baldwin, Eric P. Xing, and Fahad Shahbaz Khan. Mobillama: 547 
+
+Towards accurate and lightweight fully transparent gpt, 2024. 548 
+
+[69] Katherine Tian, Eric Mitchell, Allan Zhou, Archit Sharma, Rafael Rafailov, Huaxiu Yao, 549 
+
+Chelsea Finn, and Christopher D Manning. Just ask for calibration: Strategies for eliciting 550 
+
+calibrated confidence scores from language models fine-tuned with human feedback. arXiv 551 
+
+preprint arXiv:2305.14975 , 2023. 552 
+
+[70] Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timo-553 
+
+thée Lacroix, Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, et al. Llama: Open 554 
+
+and efficient foundation language models. arXiv preprint arXiv:2302.13971 , 2023. 555 
+
+[71] Artem Vazhentsev, Akim Tsvigun, Roman Vashurin, Sergey Petrakov, Daniil Vasilev, Maxim 556 
+
+Panov, Alexander Panchenko, and Artem Shelmanov. Efficient out-of-domain detection for 557 
+
+sequence to sequence models. In Findings of the Association for Computational Linguistics: 558 
+
+ACL 2023 , pages 1430–1454, 2023. 559 
+
+[72] Jason Wei, Xuezhi Wang, Dale Schuurmans, Maarten Bosma, Fei Xia, Ed Chi, Quoc V Le, 560 
+
+Denny Zhou, et al. Chain-of-thought prompting elicits reasoning in large language models. In 561 
+
+Advances in neural information processing systems , pages 24824–24837, 2022. 562 
+
+[73] Gwenyth Portillo Wightman, Alexandra Delucia, and Mark Dredze. Strength in numbers: 563 
+
+Estimating confidence of large language models by prompt agreement. In Proceedings of the 564 
+
+3rd Workshop on Trustworthy Natural Language Processing (TrustNLP 2023) , pages 326–362, 565 
+
+2023. 566 
+
+[74] Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. 567 
+
+Smoothquant: Accurate and efficient post-training quantization for large language models. 568 
+
+In International Conference on Machine Learning , pages 38087–38099. PMLR, 2023. 569 
+
+[75] Miao Xiong, Zhiyuan Hu, Xinyang Lu, Yifei Li, Jie Fu, Junxian He, and Bryan Hooi. Can 570 
+
+llms express their uncertainty? an empirical evaluation of confidence elicitation in llms. arXiv 571 
+
+preprint arXiv:2306.13063 , 2023. 572 
+
+[76] Miao Xiong, Zhiyuan Hu, Xinyang Lu, YIFEI LI, Jie Fu, Junxian He, and Bryan Hooi. Can 573 
+
+llms express their uncertainty? an empirical evaluation of confidence elicitation in llms. In The 574 
+
+Twelfth International Conference on Learning Representations , 2024. 575 
+
+[77] Haoran Xu, Baolin Peng, Hany Awadalla, Dongdong Chen, Yen-Chun Chen, Mei Gao, 576 
+
+Young Jin Kim, Yunsheng Li, Liliang Ren, Yelong Shen, et al. Phi-4-mini-reasoning: Exploring 577 
+
+the limits of small reasoning language models in math. arXiv preprint arXiv:2504.21233 , 2025. 578 
+
+[78] An Yang, Baosong Yang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Zhou, Chengpeng Li, 579 
+
+Chengyuan Li, Dayiheng Liu, Fei Huang, Guanting Dong, Haoran Wei, Huan Lin, Jialong 580 
+
+Tang, Jialin Wang, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Ma, Jin Xu, Jingren Zhou, 581 
+
+Jinze Bai, Jinzheng He, Junyang Lin, Kai Dang, Keming Lu, Keqin Chen, Kexin Yang, Mei Li, 582 
+
+Mingfeng Xue, Na Ni, Pei Zhang, Peng Wang, Ru Peng, Rui Men, Ruize Gao, Runji Lin, Shijie 583 
+
+14 Wang, Shuai Bai, Sinan Tan, Tianhang Zhu, Tianhao Li, Tianyu Liu, Wenbin Ge, Xiaodong 584 
+
+Deng, Xiaohuan Zhou, Xingzhang Ren, Xinyu Zhang, Xipin Wei, Xuancheng Ren, Yang Fan, 585 
+
+Yang Yao, Yichang Zhang, Yu Wan, Yunfei Chu, Yuqiong Liu, Zeyu Cui, Zhenru Zhang, and 586 
+
+Zhihao Fan. Qwen2 technical report. arXiv preprint arXiv:2407.10671 , 2024. 587 
+
+[79] Gal Yona, Roee Aharoni, and Mor Geva. Can large language models faithfully express their 588 
+
+intrinsic uncertainty in words? arXiv preprint arXiv:2405.16908 , 2024. 589 
+
+[80] Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. Hellaswag: Can 590 
+
+a machine really finish your sentence? In Proceedings of the 57th Annual Meeting of the 591 
+
+Association for Computational Linguistics , 2019. 592 
+
+[81] Peiyuan Zhang, Guangtao Zeng, Tianduo Wang, and Wei Lu. Tinyllama: An open-source small 593 
+
+language model. arXiv preprint arXiv:2401.02385 , 2024. 594 
+
+[82] Susan Zhang, Stephen Roller, Naman Goyal, Mikel Artetxe, Moya Chen, Shuohui Chen, 595 
+
+Christopher Dewan, Mona Diab, Xian Li, Xi Victoria Lin, et al. Opt: Open pre-trained 596 
+
+transformer language models. arXiv preprint arXiv:2205.01068 , 2022. 597 
+
+[83] Wayne Xin Zhao, Kun Zhou, Junyi Li, Tianyi Tang, Xiaolei Wang, Yupeng Hou, Yingqian Min, 598 
+
+Beichen Zhang, Junjie Zhang, Zican Dong, et al. A survey of large language models. arXiv 599 
+
+preprint arXiv:2303.18223 , 2023. 600 
+
+[84] Zesen Zhao, Shuowei Jin, and Z Morley Mao. Eagle: Efficient training-free router for multi-llm 601 
+
+inference. arXiv preprint arXiv:2409.15518 , 2024. 602 
+
+[85] Lianmin Zheng, Wei-Lin Chiang, Ying Sheng, Siyuan Zhuang, Zhanghao Wu, Yonghao Zhuang, 603 
+
+Zi Lin, Zhuohan Li, Dacheng Li, Eric Xing, et al. Judging llm-as-a-judge with mt-bench and 604 
+
+chatbot arena. In Advances in Neural Information Processing Systems , pages 46595–46623, 605 
+
+2023. 606 
+
+[86] Zhengping Zhou, Lezhi Li, Xinxi Chen, and Andy Li. Mini-giants:" small" language models 607 
+
+and open source win-win. arXiv preprint arXiv:2307.08189 , 2023. 608 
+
+15 NeurIPS Paper Checklist 692 
+
+The checklist is designed to encourage best practices for responsible machine learning research, 693 
+
+addressing issues of reproducibility, transparency, research ethics, and societal impact. Do not remove 694 
+
+the checklist: The papers not including the checklist will be desk rejected. The checklist should 695 
+
+follow the references and follow the (optional) supplemental material. The checklist does NOT count 696 
+
+towards the page limit. 697 
+
+Please read the checklist guidelines carefully for information on how to answer these questions. For 698 
+
+each question in the checklist: 699 
+
+• You should answer [Yes] , [No] , or [NA] . 700 
+
+• [NA] means either that the question is Not Applicable for that particular paper or the 701 
+
+relevant information is Not Available. 702 
+
+• Please provide a short (1–2 sentence) justification right after your answer (even for NA). 703 
+
+The checklist answers are an integral part of your paper submission. They are visible to the 704 
+
+reviewers, area chairs, senior area chairs, and ethics reviewers. You will be asked to also include it 705 
+
+(after eventual revisions) with the final version of your paper, and its final version will be published 706 
+
+with the paper. 707 
+
+The reviewers of your paper will be asked to use the checklist as one of the factors in their evaluation. 708 
+
+While "[Yes] " is generally preferable to "[No] ", it is perfectly acceptable to answer "[No] " provided a 709 
+
+proper justification is given (e.g., "error bars are not reported because it would be too computationally 710 
+
+expensive" or "we were unable to find the license for the dataset we used"). In general, answering 711 
+
+"[No] " or "[NA] " is not grounds for rejection. While the questions are phrased in a binary way, we 712 
+
+acknowledge that the true answer is often more nuanced, so please just use your best judgment and 713 
+
+write a justification to elaborate. All supporting evidence can appear either in the main paper or the 714 
+
+supplemental material, provided in appendix. If you answer [Yes] to a question, in the justification 715 
+
+please point to the section(s) where related material for the question can be found. 716 
+
+IMPORTANT, please: 717 
+
+• Delete this instruction block, but keep the section heading “NeurIPS Paper Checklist" ,718 
+
+• Keep the checklist subsection headings, questions/answers and guidelines below. 719 
+
+• Do not modify the questions and only use the provided macros for your answers .720 
+
+1. Claims 721 
+
+Question: Do the main claims made in the abstract and introduction accurately reflect the 722 
+
+paper’s contributions and scope? 723 
+
+Answer: [Yes] 724 
+
+Justification: Last paragraph of Section 1 725 
+
+Guidelines: 726 
+
+• The answer NA means that the abstract and introduction do not include the claims 727 
+
+made in the paper. 728 
+
+• The abstract and/or introduction should clearly state the claims made, including the 729 
+
+contributions made in the paper and important assumptions and limitations. A No or 730 
+
+NA answer to this question will not be perceived well by the reviewers. 731 
+
+• The claims made should match theoretical and experimental results, and reflect how 732 
+
+much the results can be expected to generalize to other settings. 733 
+
+• It is fine to include aspirational goals as motivation as long as it is clear that these goals 734 
+
+are not attained by the paper. 735 
+
+2. Limitations 736 
+
+Question: Does the paper discuss the limitations of the work performed by the authors? 737 
+
+Answer: [Yes] 738 
+
+Justification: Appendix E 739 
+
+30 Guidelines: 740 
+
+• The answer NA means that the paper has no limitation while the answer No means that 741 
+
+the paper has limitations, but those are not discussed in the paper. 742 
+
+• The authors are encouraged to create a separate "Limitations" section in their paper. 743 
+
+• The paper should point out any strong assumptions and how robust the results are to 744 
+
+violations of these assumptions (e.g., independence assumptions, noiseless settings, 745 
+
+model well-specification, asymptotic approximations only holding locally). The authors 746 
+
+should reflect on how these assumptions might be violated in practice and what the 747 
+
+implications would be. 748 
+
+• The authors should reflect on the scope of the claims made, e.g., if the approach was 749 
+
+only tested on a few datasets or with a few runs. In general, empirical results often 750 
+
+depend on implicit assumptions, which should be articulated. 751 
+
+• The authors should reflect on the factors that influence the performance of the approach. 752 
+
+For example, a facial recognition algorithm may perform poorly when image resolution 753 
+
+is low or images are taken in low lighting. Or a speech-to-text system might not be 754 
+
+used reliably to provide closed captions for online lectures because it fails to handle 755 
+
+technical jargon. 756 
+
+• The authors should discuss the computational efficiency of the proposed algorithms 757 
+
+and how they scale with dataset size. 758 
+
+• If applicable, the authors should discuss possible limitations of their approach to 759 
+
+address problems of privacy and fairness. 760 
+
+• While the authors might fear that complete honesty about limitations might be used by 761 
+
+reviewers as grounds for rejection, a worse outcome might be that reviewers discover 762 
+
+limitations that aren’t acknowledged in the paper. The authors should use their best 763 
+
+judgment and recognize that individual actions in favor of transparency play an impor-764 
+
+tant role in developing norms that preserve the integrity of the community. Reviewers 765 
+
+will be specifically instructed to not penalize honesty concerning limitations. 766 
+
+3. Theory assumptions and proofs 767 
+
+Question: For each theoretical result, does the paper provide the full set of assumptions and 768 
+
+a complete (and correct) proof? 769 
+
+Answer: [NA] 770 
+
+Justification: [NA] 771 
+
+Guidelines: 772 
+
+• The answer NA means that the paper does not include theoretical results. 773 
+
+• All the theorems, formulas, and proofs in the paper should be numbered and cross-774 
+
+referenced. 775 
+
+• All assumptions should be clearly stated or referenced in the statement of any theorems. 776 
+
+• The proofs can either appear in the main paper or the supplemental material, but if 777 
+
+they appear in the supplemental material, the authors are encouraged to provide a short 778 
+
+proof sketch to provide intuition. 779 
+
+• Inversely, any informal proof provided in the core of the paper should be complemented 780 
+
+by formal proofs provided in appendix or supplemental material. 781 
+
+• Theorems and Lemmas that the proof relies upon should be properly referenced. 782 
+
+4. Experimental result reproducibility 783 
+
+Question: Does the paper fully disclose all the information needed to reproduce the main ex-784 
+
+perimental results of the paper to the extent that it affects the main claims and/or conclusions 785 
+
+of the paper (regardless of whether the code and data are provided or not)? 786 
+
+Answer: [Yes] 787 
+
+Justification: Section 3.1 788 
+
+Guidelines: 789 
+
+• The answer NA means that the paper does not include experiments. 790 
+
+31 • If the paper includes experiments, a No answer to this question will not be perceived 791 
+
+well by the reviewers: Making the paper reproducible is important, regardless of 792 
+
+whether the code and data are provided or not. 793 
+
+• If the contribution is a dataset and/or model, the authors should describe the steps taken 794 
+
+to make their results reproducible or verifiable. 795 
+
+• Depending on the contribution, reproducibility can be accomplished in various ways. 796 
+
+For example, if the contribution is a novel architecture, describing the architecture fully 797 
+
+might suffice, or if the contribution is a specific model and empirical evaluation, it may 798 
+
+be necessary to either make it possible for others to replicate the model with the same 799 
+
+dataset, or provide access to the model. In general. releasing code and data is often 800 
+
+one good way to accomplish this, but reproducibility can also be provided via detailed 801 
+
+instructions for how to replicate the results, access to a hosted model (e.g., in the case 802 
+
+of a large language model), releasing of a model checkpoint, or other means that are 803 
+
+appropriate to the research performed. 804 
+
+• While NeurIPS does not require releasing code, the conference does require all submis-805 
+
+sions to provide some reasonable avenue for reproducibility, which may depend on the 806 
+
+nature of the contribution. For example 807 
+
+(a) If the contribution is primarily a new algorithm, the paper should make it clear how 808 
+
+to reproduce that algorithm. 809 
+
+(b) If the contribution is primarily a new model architecture, the paper should describe 810 
+
+the architecture clearly and fully. 811 
+
+(c) If the contribution is a new model (e.g., a large language model), then there should 812 
+
+either be a way to access this model for reproducing the results or a way to reproduce 813 
+
+the model (e.g., with an open-source dataset or instructions for how to construct 814 
+
+the dataset). 815 
+
+(d) We recognize that reproducibility may be tricky in some cases, in which case 816 
+
+authors are welcome to describe the particular way they provide for reproducibility. 817 
+
+In the case of closed-source models, it may be that access to the model is limited in 818 
+
+some way (e.g., to registered users), but it should be possible for other researchers 819 
+
+to have some path to reproducing or verifying the results. 820 
+
+5. Open access to data and code 821 
+
+Question: Does the paper provide open access to the data and code, with sufficient instruc-822 
+
+tions to faithfully reproduce the main experimental results, as described in supplemental 823 
+
+material? 824 
+
+Answer: [Yes] 825 
+
+Justification: Abstract ( https://anonymous.4open.science/r/quodlibeta )826 
+
+Guidelines: 827 
+
+• The answer NA means that paper does not include experiments requiring code. 828 
+
+• Please see the NeurIPS code and data submission guidelines ( https://nips.cc/ 829 
+
+public/guides/CodeSubmissionPolicy ) for more details. 830 
+
+• While we encourage the release of code and data, we understand that this might not be 831 
+
+possible, so “No” is an acceptable answer. Papers cannot be rejected simply for not 832 
+
+including code, unless this is central to the contribution (e.g., for a new open-source 833 
+
+benchmark). 834 
+
+• The instructions should contain the exact command and environment needed to run to 835 
+
+reproduce the results. See the NeurIPS code and data submission guidelines ( https: 836 
+
+//nips.cc/public/guides/CodeSubmissionPolicy ) for more details. 837 
+
+• The authors should provide instructions on data access and preparation, including how 838 
+
+to access the raw data, preprocessed data, intermediate data, and generated data, etc. 839 
+
+• The authors should provide scripts to reproduce all experimental results for the new 840 
+
+proposed method and baselines. If only a subset of experiments are reproducible, they 841 
+
+should state which ones are omitted from the script and why. 842 
+
+• At submission time, to preserve anonymity, the authors should release anonymized 843 
+
+versions (if applicable). 844 
+
+32 • Providing as much information as possible in supplemental material (appended to the 845 
+
+paper) is recommended, but including URLs to data and code is permitted. 846 
+
+6. Experimental setting/details 847 
+
+Question: Does the paper specify all the training and test details (e.g., data splits, hyper-848 
+
+parameters, how they were chosen, type of optimizer, etc.) necessary to understand the 849 
+
+results? 850 
+
+Answer: [Yes] 851 
+
+Justification: Section 3.1 852 
+
+Guidelines: 853 
+
+• The answer NA means that the paper does not include experiments. 854 
+
+• The experimental setting should be presented in the core of the paper to a level of detail 855 
+
+that is necessary to appreciate the results and make sense of them. 856 
+
+• The full details can be provided either with the code, in appendix, or as supplemental 857 
+
+material. 858 
+
+7. Experiment statistical significance 859 
+
+Question: Does the paper report error bars suitably and correctly defined or other appropriate 860 
+
+information about the statistical significance of the experiments? 861 
+
+Answer: [NA] 862 
+
+Justification: [NA] 863 
+
+Guidelines: 864 
+
+• The answer NA means that the paper does not include experiments. 865 
+
+• The authors should answer "Yes" if the results are accompanied by error bars, confi-866 
+
+dence intervals, or statistical significance tests, at least for the experiments that support 867 
+
+the main claims of the paper. 868 
+
+• The factors of variability that the error bars are capturing should be clearly stated (for 869 
+
+example, train/test split, initialization, random drawing of some parameter, or overall 870 
+
+run with given experimental conditions). 871 
+
+• The method for calculating the error bars should be explained (closed form formula, 872 
+
+call to a library function, bootstrap, etc.) 873 
+
+• The assumptions made should be given (e.g., Normally distributed errors). 874 
+
+• It should be clear whether the error bar is the standard deviation or the standard error 875 
+
+of the mean. 876 
+
+• It is OK to report 1-sigma error bars, but one should state it. The authors should 877 
+
+preferably report a 2-sigma error bar than state that they have a 96% CI, if the hypothesis 878 
+
+of Normality of errors is not verified. 879 
+
+• For asymmetric distributions, the authors should be careful not to show in tables or 880 
+
+figures symmetric error bars that would yield results that are out of range (e.g. negative 881 
+
+error rates). 882 
+
+• If error bars are reported in tables or plots, The authors should explain in the text how 883 
+
+they were calculated and reference the corresponding figures or tables in the text. 884 
+
+8. Experiments compute resources 885 
+
+Question: For each experiment, does the paper provide sufficient information on the com-886 
+
+puter resources (type of compute workers, memory, time of execution) needed to reproduce 887 
+
+the experiments? 888 
+
+Answer: [Yes] 889 
+
+Justification: Appendix D 890 
+
+Guidelines: 891 
+
+• The answer NA means that the paper does not include experiments. 892 
+
+• The paper should indicate the type of compute workers CPU or GPU, internal cluster, 893 
+
+or cloud provider, including relevant memory and storage. 894 
+
+33 • The paper should provide the amount of compute required for each of the individual 895 
+
+experimental runs as well as estimate the total compute. 896 
+
+• The paper should disclose whether the full research project required more compute 897 
+
+than the experiments reported in the paper (e.g., preliminary or failed experiments that 898 
+
+didn’t make it into the paper). 899 
+
+9. Code of ethics 900 
+
+Question: Does the research conducted in the paper conform, in every respect, with the 901 
+
+NeurIPS Code of Ethics https://neurips.cc/public/EthicsGuidelines ?902 
+
+Answer: [Yes] 903 
+
+Justification: All dataset used in this work are public available. This research has no violation 904 
+
+of ML safety or human rights. 905 
+
+Guidelines: 906 
+
+• The answer NA means that the authors have not reviewed the NeurIPS Code of Ethics. 907 
+
+• If the authors answer No, they should explain the special circumstances that require a 908 
+
+deviation from the Code of Ethics. 909 
+
+• The authors should make sure to preserve anonymity (e.g., if there is a special consid-910 
+
+eration due to laws or regulations in their jurisdiction). 911 
+
+10. Broader impacts 912 
+
+Question: Does the paper discuss both potential positive societal impacts and negative 913 
+
+societal impacts of the work performed? 914 
+
+Answer: [Yes] 915 
+
+Justification: Appendix F 916 
+
+Guidelines: 917 
+
+• The answer NA means that there is no societal impact of the work performed. 918 
+
+• If the authors answer NA or No, they should explain why their work has no societal 919 
+
+impact or why the paper does not address societal impact. 920 
+
+• Examples of negative societal impacts include potential malicious or unintended uses 921 
+
+(e.g., disinformation, generating fake profiles, surveillance), fairness considerations 922 
+
+(e.g., deployment of technologies that could make decisions that unfairly impact specific 923 
+
+groups), privacy considerations, and security considerations. 924 
+
+• The conference expects that many papers will be foundational research and not tied 925 
+
+to particular applications, let alone deployments. However, if there is a direct path to 926 
+
+any negative applications, the authors should point it out. For example, it is legitimate 927 
+
+to point out that an improvement in the quality of generative models could be used to 928 
+
+generate deepfakes for disinformation. On the other hand, it is not needed to point out 929 
+
+that a generic algorithm for optimizing neural networks could enable people to train 930 
+
+models that generate Deepfakes faster. 931 
+
+• The authors should consider possible harms that could arise when the technology is 932 
+
+being used as intended and functioning correctly, harms that could arise when the 933 
+
+technology is being used as intended but gives incorrect results, and harms following 934 
+
+from (intentional or unintentional) misuse of the technology. 935 
+
+• If there are negative societal impacts, the authors could also discuss possible mitigation 936 
+
+strategies (e.g., gated release of models, providing defenses in addition to attacks, 937 
+
+mechanisms for monitoring misuse, mechanisms to monitor how a system learns from 938 
+
+feedback over time, improving the efficiency and accessibility of ML). 939 
+
+11. Safeguards 940 
+
+Question: Does the paper describe safeguards that have been put in place for responsible 941 
+
+release of data or models that have a high risk for misuse (e.g., pretrained language models, 942 
+
+image generators, or scraped datasets)? 943 
+
+Answer: [NA] 944 
+
+Justification: [NA] 945 
+
+Guidelines: 946 
+
+34 • The answer NA means that the paper poses no such risks. 947 
+
+• Released models that have a high risk for misuse or dual-use should be released with 948 
+
+necessary safeguards to allow for controlled use of the model, for example by requiring 949 
+
+that users adhere to usage guidelines or restrictions to access the model or implementing 950 
+
+safety filters. 951 
+
+• Datasets that have been scraped from the Internet could pose safety risks. The authors 952 
+
+should describe how they avoided releasing unsafe images. 953 
+
+• We recognize that providing effective safeguards is challenging, and many papers do 954 
+
+not require this, but we encourage authors to take this into account and make a best 955 
+
+faith effort. 956 
+
+12. Licenses for existing assets 957 
+
+Question: Are the creators or original owners of assets (e.g., code, data, models), used in 958 
+
+the paper, properly credited and are the license and terms of use explicitly mentioned and 959 
+
+properly respected? 960 
+
+Answer: [NA] 961 
+
+Justification: All the code, data, and models in this work is opensourced with Apache-2.0 962 
+
+licence. 963 
+
+Guidelines: 964 
+
+• The answer NA means that the paper does not use existing assets. 965 
+
+• The authors should cite the original paper that produced the code package or dataset. 966 
+
+• The authors should state which version of the asset is used and, if possible, include a 967 
+
+URL. 968 
+
+• The name of the license (e.g., CC-BY 4.0) should be included for each asset. 969 
+
+• For scraped data from a particular source (e.g., website), the copyright and terms of 970 
+
+service of that source should be provided. 971 
+
+• If assets are released, the license, copyright information, and terms of use in the 972 
+
+package should be provided. For popular datasets, paperswithcode.com/datasets 973 
+
+has curated licenses for some datasets. Their licensing guide can help determine the 974 
+
+license of a dataset. 975 
+
+• For existing datasets that are re-packaged, both the original license and the license of 976 
+
+the derived asset (if it has changed) should be provided. 977 
+
+• If this information is not available online, the authors are encouraged to reach out to 978 
+
+the asset’s creators. 979 
+
+13. New assets 980 
+
+Question: Are new assets introduced in the paper well documented and is the documentation 981 
+
+provided alongside the assets? 982 
+
+Answer: [NA] 983 
+
+Justification: [NA] 984 
+
+Guidelines: 985 
+
+• The answer NA means that the paper does not release new assets. 986 
+
+• Researchers should communicate the details of the dataset/code/model as part of their 987 
+
+submissions via structured templates. This includes details about training, license, 988 
+
+limitations, etc. 989 
+
+• The paper should discuss whether and how consent was obtained from people whose 990 
+
+asset is used. 991 
+
+• At submission time, remember to anonymize your assets (if applicable). You can either 992 
+
+create an anonymized URL or include an anonymized zip file. 993 
+
+14. Crowdsourcing and research with human subjects 994 
+
+Question: For crowdsourcing experiments and research with human subjects, does the paper 995 
+
+include the full text of instructions given to participants and screenshots, if applicable, as 996 
+
+well as details about compensation (if any)? 997 
+
+Answer: [NA] 998 
+
+35 Justification: [NA] 999 
+
+Guidelines: 1000 
+
+• The answer NA means that the paper does not involve crowdsourcing nor research with 1001 
+
+human subjects. 1002 
+
+• Including this information in the supplemental material is fine, but if the main contribu-1003 
+
+tion of the paper involves human subjects, then as much detail as possible should be 1004 
+
+included in the main paper. 1005 
+
+• According to the NeurIPS Code of Ethics, workers involved in data collection, curation, 1006 
+
+or other labor should be paid at least the minimum wage in the country of the data 1007 
+
+collector. 1008 
+
+15. Institutional review board (IRB) approvals or equivalent for research with human 1009 
+
+subjects 1010 
+
+Question: Does the paper describe potential risks incurred by study participants, whether 1011 
+
+such risks were disclosed to the subjects, and whether Institutional Review Board (IRB) 1012 
+
+approvals (or an equivalent approval/review based on the requirements of your country or 1013 
+
+institution) were obtained? 1014 
+
+Answer: [NA] 1015 
+
+Justification: [NA] 1016 
+
+Guidelines: 1017 
+
+• The answer NA means that the paper does not involve crowdsourcing nor research with 1018 
+
+human subjects. 1019 
+
+• Depending on the country in which research is conducted, IRB approval (or equivalent) 1020 
+
+may be required for any human subjects research. If you obtained IRB approval, you 1021 
+
+should clearly state this in the paper. 1022 
+
+• We recognize that the procedures for this may vary significantly between institutions 1023 
+
+and locations, and we expect authors to adhere to the NeurIPS Code of Ethics and the 1024 
+
+guidelines for their institution. 1025 
+
+• For initial submissions, do not include any information that would break anonymity (if 1026 
+
+applicable), such as the institution conducting the review. 1027 
+
+16. Declaration of LLM usage 1028 
+
+Question: Does the paper describe the usage of LLMs if it is an important, original, or 1029 
+
+non-standard component of the core methods in this research? Note that if the LLM is used 1030 
+
+only for writing, editing, or formatting purposes and does not impact the core methodology, 1031 
+
+scientific rigorousness, or originality of the research, declaration is not required. 1032 
+
+Answer: [Yes] 1033 
+
+Justification: Section 3.1 describes the usage of LLMs. 1034 
+
+Guidelines: 1035 
+
+• The answer NA means that the core method development in this research does not 1036 
+
+involve LLMs as any important, original, or non-standard components. 1037 
+
+• Please refer to our LLM policy ( https://neurips.cc/Conferences/2025/LLM )1038 
+
+for what should or should not be described. 1039 
+
+36

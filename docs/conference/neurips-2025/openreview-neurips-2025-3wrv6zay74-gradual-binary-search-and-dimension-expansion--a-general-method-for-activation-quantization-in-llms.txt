@@ -1,0 +1,2189 @@
+Title: 10415_Gradual_Binary_Search_an.pdf
+
+URL Source: https://openreview.net/pdf?id=3Wrv6Zay74
+
+Number of Pages: 24
+
+Markdown Content:
+# Gradual Binary Search and Dimension Expansion : A general method for activation quantization in LLMs 
+
+Anonymous Author(s) 
+
+Affiliation Address 
+
+email 
+
+## Abstract 
+
+Large language models (LLMs) have become pivotal in artificial intelligence, 1
+
+demonstrating strong capabilities in reasoning, understanding, and generating 2
+
+data. However, their deployment on edge devices is hindered by their substantial 3
+
+size, often reaching several billion parameters. Quantization is a widely used 4
+
+method to reduce memory usage and inference time, however LLMs present unique 5
+
+challenges due to the prevalence of outliers in their activations. In this work, we 6
+
+leverage the theoretical advantages of Hadamard matrices over random rotation 7
+
+matrices to push the boundaries of quantization in LLMs. We demonstrate that 8
+
+Hadamard matrices are more effective in reducing outliers, which are a significant 9
+
+obstacle in achieving low-bit quantization. Our method based on a gradual binary 10 
+
+search enables 3-bit quantization for weights, activations, and key-value (KV) 11 
+
+caches, resulting in a 40% increase in accuracy on common benchmarks compared 12 
+
+to SoTA methods. We extend the use of rotation matrices to support non-power-13 
+
+of-2 embedding dimensions, similar to the Qwen architecture, by employing the 14 
+
+Paley’s algorithm. Our experimental results on multiple models family like Mistral, 15 
+
+LLaMA, and Qwen demonstrate the effectiveness of our approach, outperforming 16 
+
+existing methods and enabling practical 3-bit quantization. 17 
+
+## 1 Introduction 18 
+
+Large Language Models (LLMs) have become a central component of artificial intelligence due 19 
+
+to their strong capabilities in reasoning, understanding, and generating data. These impressive 20 
+
+capabilities are attributed to the quality of the data used during training, the model architecture, and 21 
+
+the size of the model, which often reaches several billion parameters. This size limitation restricts 22 
+
+their deployment on edge devices. Quantization is a widely used method to reduce memory usage 23 
+
+and inference time [ 12 , 13 ], but the challenges differ compared to those faced with Convolutional 24 
+
+Neural Networks (CNNs) [9, 29]. 25 
+
+Weights are relatively easy to quantize for both CNNs and LLMs and can often achieve ternary 26 
+
+quantization without significant loss of accuracy [ 20 , 32 ]. However, activations behave differently in 27 
+
+transformer architectures [ 23 ]. The presence of outliers in activations makes conventional quantization 28 
+
+(symmetric uniform) very challenging, hindering our ability to achieve 4-bit quantization. LLMs are 29 
+
+known to produce spikes in its layers and for some tokens that can be handled separately or diffused 30 
+
+in the tensor [7, 29]. 31 
+
+One very promising approach to overcome this limitation is to use rotation matrices to redistribute 32 
+
+weights and activation values, thereby minimizing the impact of outliers [ 19 , 2]. Additionally, 33 
+
+methods such as prefix tokens have shown very interesting results in managing outliers in LLMs 34 
+
+[4, 24]. 35 
+
+Submitted to 39th Conference on Neural Information Processing Systems (NeurIPS 2025). Do not distribute. In this work, we leverage results on rotation matrices to push the boundaries further and enable 3-bit 36 
+
+Weights, Activations, KV cache (WAKV) quantization by employing a binary search. We extend 37 
+
+this method to a more general approach capable of handling non-power-of-2 embedding dimensions, 38 
+
+similar to Qwen. Our main contributions are: 39 
+
+• A theoretical demonstration that Hadamard matrices are more effective in reducing outliers 40 
+
+than rotation matrices drawn on the unit sphere. 41 
+
+• 3-bit quantization for weights, activations, and KV cache, resulting in a 40% increase in 42 
+
+accuracy on common benchmarks using a gradual binary search. 43 
+
+• Extension of rotation matrices to support non-power-of-2 embedding dimensions using the 44 
+
+Paley’s algorithm. 45 
+
+• The introduction of dimension expansion to build a more general rotation pipeline allowing 46 
+
+architectures like Qwen to work with rotations. 47 
+
+## 2 Related Works 48 
+
+2.1 Quantization 49 
+
+Quantizing models involves reducing the number of bits required to store and compute model 50 
+
+activations. This process is crucial for deploying LLMs on resource-constrained devices. To achieve 51 
+
+this, we define a scaling factor that determines the distance between quantization bins and the range 52 
+
+of values to be compressed. 53 
+
+For symmetric uniform quantization, we apply a rounding function to a scaled distribution: 
+
+ˆX = round 
+
+ X
+
+∆
+
+
+
+∆, ∆ = max |X|
+
+2b − 1
+
+where ∆ is the scaling factor, b is the bitwidth, and max |X| is the maximum absolute value of the 54 
+
+distribution, preserving extreme values for activations. 55 
+
+Such quantization can be applied per-token, where each token has a different scaling factor, or per-56 
+
+tensor, where a single scaling factor is used for each activation tensor [ 12 , 13 ]. Per-token quantization 57 
+
+is more challenging to implement efficiently in practice compared to per-tensor quantization but 58 
+
+results in better quantization performances. Scaling factors can be static during inference, based on 59 
+
+statistics computed on a subset of the dataset, or dynamic, recomputed at each step. 60 
+
+Quantization can lead to a significant drop in performance when applied post-training (PTQ) [ 30 ]. 61 
+
+To mitigate this, some methods adapt weights to the noise introduced during a training phase (QAT) 62 
+
+[ 18 , 8]. Typically, for LLMs, only linear layers are quantized, as they account for most of the 63 
+
+computation cost, while normalization layers, matrix multiplications, and the softmax function within 64 
+
+the attention block are left unquantized. 65 
+
+2.2 Outliers 66 
+
+Quantizing LLM weights is relatively straightforward and does not require extensive efforts to achieve. 67 
+
+Techniques like GPTQ [ 11 ] enables 8-bit quantization without retraining, preserving model accuracy. 68 
+
+Some QAT methods can even push the boundaries to 1-bit quantization, as seen in BitNet [ 26 ] or 69 
+
+ternary quantization [20]. 70 
+
+However, LLMs present unique challenges due to the prevalence of extreme high values in their 71 
+
+activations [ 27 , 23 , 15 , 17 ]. The scaling factor, which is directly tied to the maximum absolute value, 72 
+
+often causes most of the distribution to be rounded to zero, leading to performance degradation. To 73 
+
+address this, techniques like LLM.int8() [ 7 ] cluster these outliers and quantize them separately from 74 
+
+the main distribution. 75 
+
+Alternative methods, such as SmoothQuant [ 29 ], shift the quantization challenge from activations 76 
+
+to weights by introducing a scaling parameter between them. Other approaches attempt to relocate 77 
+
+these spikes into "sink tokens" before quantization [ 24 ]. Some research focuses on understanding the 78 
+
+upstream causes of these spikes during the learning process to limit their impact post-training [ 23 ]. 79 
+
+2Figure 1: Architecture’s pipeline with rotation matrices R1, R 2, R 3, R 4 and dimension expansion. Red lines represents expanded tokens in 4096+ d dimensions and green lines represents non expanded tokens. Projections in red (QKV, Gate, Up and LM head ) have their input weigths dimension expanded and projections in green (Out, Down and Embeddings) have their output weights dimension expanded Additionally, efforts are made to better locate these outliers by visualizing the layers, dimensions, 80 
+
+and tokens that may be their source [22]. 81 
+
+2.3 Rotation Matrices 82 
+
+2.3.1 Random orthogonal matrices 83 
+
+Rotation matrices play a pivotal role in various applications, including signal processing, computer 84 
+
+vision, and machine learning. These matrices are orthogonal and invertible by their transpose, meaning 85 
+
+they preserve the length of vectors and the angles between them. In the context of quantization, 86 
+
+rotation matrices can be used to decorrelate and redistribute the energy of model activations [ 1 , 2 , 3 ], 87 
+
+making them more amenable to quantization. The idea is to apply orthogonal matrices before 88 
+
+quantization to flatten the distribution and then recover the tensor by applying its inverse (see Figure 89 
+
+1). Part of this process can be pre-computed and fused with weights and the rest needs to be done at 90 
+
+inference [1]. 91 
+
+However, the effectiveness of rotation matrices depends on the specific matrix used. Randomly drawn 92 
+
+orthogonal rotation matrices can introduce noise and reduce the overall performance of the model. 93 
+
+To mitigate this, some methods adapt the rotation matrices during a training phase to better align with 94 
+
+the model’s weights and activations [19]. 95 
+
+In practice, rotation matrices are often used in conjunction with other quantization techniques, such as 96 
+
+GPTQ. This combination allows for more robust and efficient quantization of large language models, 97 
+
+enabling their deployment on resource-constrained devices. 98 
+
+2.3.2 Hadamard matrices 99 
+
+Hadamard matrices are another powerful tool in the quantization arsenal. These matrices are 100 
+
+orthogonal matrices and all their entries are either +1 or -1 making them very efficient to compute 101 
+
+(eq 1). Hadamard matrices have been extensively used in signal processing, error-correcting codes 102 
+
+[14], and more recently, in the quantization of neural networks [1, 2]. 103 
+
+One of the key advantages of Hadamard matrices is their ability to decorrelate the activations of a 104 
+
+model. By applying a Hadamard matrix, the activations are transformed into a new basis where the 105 
+
+correlations between different dimensions are minimized. This decorrelation property is particularly 106 
+
+useful in reducing the impact of outliers, as the extreme values are spread out across multiple 107 
+
+dimensions. 108 
+
+Hadamard matrices of order 2n can be constructed recursively using the Fast Hadamard Transform 109 
+
+(FHT) method: For n ≥ 1, construct the 2n+1 × 2n+1 Hadamard matrix H2n+1 using the 2n × 2n
+
+> 110
+
+3Hadamard matrix H2n as follows: 111 
+
+H2 =
+
+1 11 −1
+
+
+
+, H4 =
+
+
+
+1 1 1 11 −1 1 −11 1 −1 −11 −1 −1 1
+
+ , H2n+1 =
+
+H2n H2n
+
+H2n −H2n
+
+
+
+(1) This method is highly efficient for generating Hadamard matrices and can be applied in real-time. In 112 
+
+summary, both rotation matrices and Hadamard matrices are essential for the quantization of large 113 
+
+language models. However, Hadamard matrices offer several advantages: they can be generated 114 
+
+more efficiently, their structure of containing only 1 and -1 makes them highly efficient for matrix 115 
+
+multiplication, and they are known to handle outliers in activations more effectively [ 19 ]. In the 116 
+
+following sections, we will theoretically demonstrate that Hadamard matrices are more effective than 117 
+
+random rotation matrices drawn from the unit sphere in reducing the amplitude of outliers. 118 
+
+2.3.3 Paley algorithm 119 
+
+To generate other dimensions n for Hadamard matrix we can use known small matrices and apply 120 
+
+power of 2 algorithm as used in QuaRot [ 2] but it can be limiting and doesn’t cover a lot of values. 121 
+
+To overcome this issue we can use the Paley’s Algorithm that generate a Hadamard matrix n × n if 122 
+
+n − 1 is a prime number and n − 1 ≡ 3 (mod 4) . This algorithm is described below (Algorithm 2) 123 
+
+and needs to generate Legendre symbols 
+
+ ap
+
+
+
+which take any integer number a and prime number p124 
+
+to produce a value in {− 1, 0, 1} as below : 125 
+
+• If a is a quadratic residue modulo p, then there exists an integer x such that x2 ≡ a (mod p).126 
+
+In this case, 
+
+ ap
+
+
+
+= 1 .127 
+
+• If a is a quadratic non-residue modulo p, then there is no integer x such that x2 ≡ a128 
+
+(mod p). In this case, 
+
+ ap
+
+
+
+= −1.129 
+
+• If a ≡ 0 (mod p), then 
+
+ ap
+
+
+
+= 0 .130 
+
+Generating Legendre symbols can be time-consuming, especially for high-dimensional matrices. 131 
+
+However, in the following sections, we will use this algorithm to generate non-power-of-2 Hadamard 132 
+
+matrices and fuse them with the weights, so we only need to compute the Legendre symbols once. 133 
+
+## 3 Analysis and theoretical demonstrations 134 
+
+3.1 Clipping Ratio 135 
+
+To perform quantization we can play on several parameters to improve the effectiveness of the process, 136 
+
+for example in LSQ [ 9] they optimise the scaling factor trough training, or FracBits [ 31 ] which tries 137 
+
+to find the best precision for every layer. Other works highlighted the importance of the clipping ratio 138 
+
+like PACT [ 5] where the optimization is done during training. Some others apply a Grid Search [ 4] to 139 
+
+find the best configuration particularly useful for LLMs where training or fine tuning can be very 140 
+
+time consuming. 141 
+
+Clipping ratios are essential for managing outliers, as they establish the balance between maintaining 142 
+
+high precision for small values and preserving a maximum value close to its original. However, the 143 
+
+model exhibits significant variability in how quantization responds to changes in the clipping ratio. 144 
+
+While some projections can tolerate very low clipping ratios, others experience a substantial accuracy 145 
+
+drop with even slight adjustments (see Appendix C). Therefore, to effectively manage this variability, 146 
+
+a tailored clipping ratio must be determined for each projection. 147 
+
+Previous studies have shown that quantization error is not always the best metric to guide the opti-148 
+
+mization process for quantization parameters [ 21 ]. Specifically, at very low precision levels, such as 4 149 
+
+or 3 bits, the set of quantized weights deviates significantly from the optimized configuration obtained 150 
+
+during training. Attempting to recover this configuration using quantization error often results in 151 
+
+an ineffective set of weights. To address this issue, we can use perplexity as an objective function. 152 
+
+4Perplexity provides a more accurate representation of model performance and is computationally 153 
+
+efficient, as it is based on Cross Entropy Loss, which is frequently used during training for its 154 
+
+smoothness. 155 
+
+3.2 Hadamard Matrices reduce outliers more 156 
+
+Experimentally, it is observed that Hadamard matrices tend to reduce better the amplitude of outliers 157 
+
+present in the layers of LLMs, which directly impacts the performance of these models. However, the 158 
+
+question of why such a phenomenon occurs has remained open from a theoretical perspective. We 159 
+
+now provide an answer to this question. 160 
+
+Theorem 3.1 (Hadamard reduction) . ∀x ∈ Rn containing an outlier, i.e., x = ( c, ϵ, ..., ϵ )T with 
+
+c >> ϵ we have 
+
+max  
+
+> 1≤i≤n
+
+|(Hx )i| ≤ max  
+
+> 1≤i≤n
+
+|(Qx )i|
+
+with H a Hadamard matrix belonging to Rn×n and Q a rotation matrix drawn randomly on the unit 161 
+
+sphere Sn−1 = {x ∈ Rn : || x|| 2 = 1 }.162 
+
+To demonstrate Theorem 3.1, we can calculate the two terms of the inequality and thus show the 163 
+
+superiority of one over the other. 164 
+
+Lemma 3.1 (Hadamard incoherence) . For H a Hadamard matrix belonging to Rn×n and x =(c, ϵ, ..., ϵ )T with c >> ϵ 
+
+max  
+
+> 1≤i≤n
+
+|(Hx )i| = c
+
+√n
+
+> 165
+
+Lemma 3.2 (Rotation incoherence) . For Q a rotation matrix drawn randomly on the unit sphere 
+
+Sn−1 = {x ∈ Rn : || x|| 2 = 1 } and x = ( c, 0, ..., 0) T with c >> 1max  
+
+> 1≤i≤n
+
+|(Qx )i| = c
+
+r 2 log nn
+
+> 166
+
+We can prove in Lemma 3.1 and Lemma 3.2 that the reduction of outliers with a Hadamard matrix 167 
+
+is of order O( 1√n ) and O(
+
+q 2 log nn ) for a random orthogonal matrix (demonstrations are done in 168 
+
+Appendix A). These results prove Theorem 3.1 and also show the close link between reduction and 169 
+
+the dimension of embeddings in LLMs. The higher the dimension is the stronger the reduction will 170 
+
+be. We can also demonsatrate in Theorem 3.2 that Hadamard matrices are optimal and the best group 171 
+
+of matrices to reduce outliers. 172 
+
+Theorem 3.2 (Hadamard optimality) . For any orthogonal matrix Q ∈ Rn×n we have: 
+
+max  
+
+> 1≤i,j ≤n
+
+|Qij | ≥ 1
+
+√n
+
+And a Hadamard matrix reaches this bound. 173 
+
+## 4 Method 174 
+
+4.1 Gradual Binary Search 175 
+
+In Section 3.1, we emphasize the importance of the clipping ratio parameter and its significant impact 176 
+
+on model performance. We stress the need to optimize each projection with its own clipping ratio 177 
+
+for best results. Our primary contribution is an algorithm that determines the optimal clipping ratio 178 
+
+for each quantizer using a binary search (Algorithm 1). To drive the binary search, we minimize 179 
+
+perplexity across various clipping ratios, assuming a single minimum and a convex landscape. 180 
+
+Additionally, we quantize our model gradually: first, we quantize and optimize the initial linear 181 
+
+projection while keeping the rest in FP16, then use the obtained parameters to quantize and optimize 182 
+
+the next projection, and so on. This process is discussed in Appendix C where we experimentally 183 
+
+show the necessity to optimize gradually the clipping ratio. 184 
+
+5Algorithm 1 Gradual Binary Search 
+
+Require: A model M , a dataset D, a threshold ϵ
+
+Ensure: A list L of clipping ratios ▷ + operand on L means concatenation 1: n ← number of projections in M 2: L ← [ ] 
+
+3: for i ← 1 to n − 1 do 
+
+4: a ← 0
+
+5: b ← 1
+
+6: m ← (a + b)/2 ▷ We keep track of the middle element 7: M ← quantize_proj (M, i ) ▷ Quantize projection i of model M
+
+8: fm = evaluate (M, D, L + m) ▷ Evaluate model M on dataset D with clipping ratios L 9: iteration ← 0
+
+10: while b − a > ϵ do ▷ We iterate until we converge 11: if iteration is even then ▷ Allows to use only one loop for binary search 12: x ← (a + m)/2
+
+13: else 
+
+14: x ← (b + m)/2
+
+15: end if 
+
+16: fx ← evaluate (M, D, L + x) ▷ Evaluate model on a new clipping ratio 17: if fx < f m then ▷ If we improve PPL (the lower the better) we keep it 18: if x < m then ▷ If the target is less than the middle, search the left half 19: b ← m
+
+20: else ▷ If not , search the right half 21: a ← m
+
+22: end if 
+
+23: m, f m ← x, f x
+
+24: else 
+
+25: if x < m then 
+
+26: a ← x
+
+27: else 
+
+28: b ← x
+
+29: end if 
+
+30: end if 
+
+31: iteration ← iteration + 1 
+
+32: end while 
+
+33: L = L + m ▷ Add new element to the list 34: end for 
+
+35: return L
+
+4.2 Increasing dimensions 185 
+
+Lemma 4.1 (Expanding limit) . For a matrix product AB with A ∈ Rm×n and B ∈ Rn×p in b bits 186 
+
+and A′B′ with A′ ∈ Rm×(n+d) and B′ ∈ R(n+d)×p in b′ bits we must have d ≤ n(b−b′) 
+
+> b′
+
+so that 187 
+
+BitOps (A′B′) ≤ BitOps (AB ), with m, n, p, b, b ′ ∈ N and b′ ≤ b188 
+
+One important limitation of QuaRot’s implementation of rotation matrices in LLMs is the necessity 189 
+
+to have embeddings in a power of 2 dimension which can be very limiting in some architectures like 190 
+
+Qwen2.5-1.5B which have features in dimension 1536 and can not be quantized with QuaRot. To 191 
+
+overcome this problem we increase manually the dimension of embedding by adding zeros in the 192 
+
+weights (independently developed in [ 10 ]) to reach a dimension suitable to generate a Hadamard 193 
+
+matrix with the Paley’s algorithm 2. Then we save the matrix product of weights padded with 0s 194 
+
+and the Hadamard matrix as our new weights (see figure 1 and Eq 2 for an example in dimension 4). 195 
+
+The primary goal is to create a more versatile pipeline compatible with any architecture but it also 196 
+
+enhance performance through increased dimensionality. 197 
+
+W ←
+
+
+
+1 1 1 11 −1 1 −11 1 −1 −11 −1 −1 1
+
+ ×
+
+
+
+a bc d
+
+0 00 0
+
+ (2) Indeed theorem 3.1 ensures that increasing the dimension helps reduce the impact of outliers in any 198 
+
+tensor. Consequently, by adding zeros to the weight tensors, we also improve the effectiveness of 199 
+
+6Table 1: Results in 4 bits WAKV quantization on perplexity (PPL), PIQA, hellaswag (HS), arc-easy (ARC-E), arc-challenge (ARC-C), winogrande (WINO) and lambada, we also compute the average value (AVG) which represents a % of success. We compare our method, GBS, with QuaRot (where QuaRot + indicates the use of dimension expansion) and clearly observe that GBS outperforms QuaRot across all computed metrics. Additionally, dimension expansion enables QuaRot to be compatible with Qwen’s family of models. 
+
+Model Method PPL ↓ PIQA HS ARC-E ARC-C Wino Lambada AVG ↑
+
+Mistral 7B Inst v0.3 FP16 5.49 71.27 74.6 67.94 74.27 58.96 82.66 71.62 QuaRot 5.98 67.7 71.45 63.94 69.53 55.2 79.46 67.88 QuaRot + GBS 5.75 70.55 74.44 66.66 71.82 56.66 80.77 70.15 
+
+Mistral 7B v0.1 FP16 5.25 72.49 75.59 69.4 73.95 54.86 80.18 71.08 QuaRot 5.82 67.62 71.88 63.36 70.01 48.98 76.6 66.41 QuaRot + GBS 5.57 71.47 74.95 68 72.22 51.54 79.21 69.56 
+
+Llama2 7B FP16 5.47 71.08 73.9 68.25 68.98 46.33 74.58 67.19 QuaRot 6.21 64.65 69.09 60.22 64.64 43.17 69.78 61.92 QuaRot + GBS 6.04 65.64 69.88 61.4 66.46 42.32 70.75 62.74 
+
+Llama3 8B FP16 6.13 72.62 76.01 69.22 72.93 53.41 77.69 70.3 QuaRot 8.33 61.66 66.27 57.05 64.72 42.06 68.06 59.97 QuaRot + GBS 7.4 67.87 72.02 63.73 71.03 45.9 73.7 65.71 
+
+Qwen2.5 7B Inst FP16 7.45 66.23 69.73 62.74 70.56 55.12 81.02 67.57 QuaRot - - - - - - - -QuaRot + 9.21 56.66 59.31 54.01 63.54 48.89 69.78 58.7 QuaRot + + GBS 8.23 62.58 64.91 60.24 66.61 49.4 72.39 62.69 
+
+Qwen2.5 1.5B Inst FP16 9.64 58.09 61.21 54.98 63.3 46.59 75.8 60.0 QuaRot - - - - - - - -QuaRot + 14.44 39.05 40.23 37.86 54.85 35.75 58.71 44.41 QuaRot + + GBS 12.05 43.94 45.24 42.64 58.64 39.33 65.61 49.23 
+
+quantization. The intuition behind it is that by adding more dimensions in our tensors we create more 200 
+
+space to store information and especially outliers which will be sliced in more parts and recovered 201 
+
+better after quantization. This process increases the model size and computational cost, necessitating 202 
+
+a trade-off to achieve better accuracy without a significant increase in computational requirements. 203 
+
+Since we only expand the input and output dimensions of the attention block and Multi-Layer 204 
+
+Perceptron (MLP), there is no additional computational cost at inference. The new weights are stored, 205 
+
+and the Hadamard matrices required for inference remain unchanged, allowing them to be efficiently 206 
+
+computed using the FHT. 207 
+
+Lemma 4.1 shows the threshold after which the increase in dimentionality is worse than just quantizing 208 
+
+with one more bit. For example with a LLaMA3-8B which has embeddings in 4096 dimensions we 209 
+
+are only allowed to increase to d = 1366 dimensions in 3 bits before reaching the computational cost 210 
+
+in 4 bits. 211 
+
+## 5 Experiments 212 
+
+5.1 Setup 213 
+
+We conduct our experiment based on the the code of QuaRot which performs per-token quantization 214 
+
+for activations and GPTQ for weights. We also quantize KV caches using asymmetric quantization 215 
+
+with a group size of 128. We compare our results on several metrics : perplexity (PPL) on WikiText2, 216 
+
+and 6 benchmarks : PIQA, hellaswag (HS), arc-easy (ARC-E), arc-challenge (ARC-C), winogrande 217 
+
+(WINO) and lambada, we also compute the average value (AVG) of these 6 benchmarks. We performs 218 
+
+ours experiments in 4 and 3 bits quantization on 6 different models from the Mistral library, LLaMA 219 
+
+architecture and Qwen. We used only one GPU A100 to perform quantization and Gradual Binary 220 
+
+Search (GBS) with 10% of the train set of WikiText2 for 4 days for the biggest models. 221 222 223 
+
+7Table 2: Results in 3 bits WAKV quantization on perplexity (PPL), PIQA, hellaswag (HS), arc-easy (ARC-E), arc-challenge (ARC-C), winogrande (WINO) and lambada, we also compute the average value (AVG) which represents a % of success. We compare our method, GBS, with QuaRot (where QuaRot + indicates the use of dimension expansion) and clearly observe that GBS outperforms QuaRot across all computed metrics. Additionally, dimension expansion enables QuaRot to be compatible with Qwen’s family of models. 
+
+Model Method PPL ↓ PIQA HS ARC-E ARC-C Wino Lambada AVG ↑
+
+Mistral 7B Inst v0.3 FP16 5.49 71.27 74.6 67.94 74.27 58.96 82.66 71.62 QuaRot 38.28 7.66 9.49 5.82 51.46 23.55 34.39 22.06 QuaRot + GBS 7.04 62.17 66.93 57.4 61.56 46.42 73.44 61.32 
+
+Mistral 7B v0.1 FP16 5.25 72.49 75.59 69.4 73.95 54.86 80.18 71.08 QuaRot 100.85 3.07 4.13 2.0 48.62 22.18 30.6 18.43 QuaRot + GBS 7.31 59.22 64.41 54.03 63.3 40.53 68.39 58.31 
+
+Llama2 7B FP16 5.47 71.08 73.9 68.25 68.98 46.33 74.58 67.19 QuaRot 332.56 0.25 0.47 0.04 51.14 26.11 30.39 18.07 QuaRot + GBS 9.18 39.03 49.91 28.14 56.12 31.91 54.92 43.34 
+
+Llama3 8B FP16 6.13 72.62 76.01 69.22 72.93 53.41 77.69 70.3 QuaRot 1315 0.05 0.08 0.02 49.41 23.72 27.78 16.84 QuaRot + GBS 12.62 44.92 50.32 39.51 60.22 32.85 53.7 46.92 
+
+Qwen2.5 7B Inst FP16 7.45 66.23 69.73 62.74 70.56 55.12 81.02 67.57 QuaRot - - - - - - - -QuaRot + 251 1.14 1.14 1.14 49.33 25.0 32.15 18.32 QuaRot + + GBS 12.33 41.9 42.62 41.18 56.59 40.53 61.83 47.44 
+
+Qwen2.5 1.5B Inst FP16 9.64 58.09 61.21 54.98 63.3 46.59 75.8 60.0 QuaRot - - - - - - - -QuaRot + 3411 0.06 0.12 0.0 49.72 23.98 27.99 16.98 QuaRot + + GBS 34.97 13.84 14.81 12.87 52.17 23.72 38.89 26.05 
+
+5.2 Results 224 
+
+5.2.1 Gradual Binary Search performances 225 
+
+Table 1 and Table 2 shows the results in 4 and 3 bits quantization on the perplexity and 6 benchmarks. 226 
+
+In 4 bits our method GBS clearly outperforms previous methods for all models improving up to 227 
+
+almost 6% for LLaMA3-8B, 5% on Qwen2.5 1.5B Instruct, 4% on Mistral 7B and 3% on Mistral 7B 228 
+
+Instruct. 229 
+
+In 3 bits GBS made activation quantization possible with an increase of accuracy reaching 40% for 230 
+
+Mistral 7B (Table 2). All other models have been greatly affected by GBS reducing the gap with 4 231 
+
+bits quantization. PPL is also significantly impacted by GBS reducing by a factor of 100 in the case 232 
+
+of LLaMA3-8B. We now have a method reaching decent performances in 3 bits like with Mistral 7B 233 
+
+Instruct which is only 10% less than FP16 and reach 61.32% accuracy on our benchmarks. 234 
+
+GBS appears to be highly effective in enhancing quantization performance, supporting our hypothesis 235 
+
+that optimizing Perplexity via binary search is preferable to minimizing quantization error. We 236 
+
+assumed a single minimum and a convex function, allowing us to leverage binary search while relying 237 
+
+on the smoothness of CrossEntropy—an assumption that appears to hold true. Perplexity emerges 238 
+
+as a strong objective for guiding our optimization, as it correlates well with improved benchmark 239 
+
+performance (see Appendix D for more details). 240 
+
+We also evaluated GBS using two additional methods: SpinQuant [ 19 ] and DFRot [ 28 ], both relying 241 
+
+on rotation matrices (see Appendix E). Our binary search approach, particularly when restricted to 3 242 
+
+bits, significantly enhances their performance, thus validating the broad effectiveness of our method 243 
+
+5.2.2 Matrix expansion effect 244 
+
+To execute QuaRot on Qwen2.5 1.5B, as shown in Tables 1 and 2, we needed to increase the 245 
+
+embedding dimension (as detailed in Section 4.2) to a value that can generate a Hadamard matrix. 246 
+
+Initially, 1536 was not suitable since it is neither a power of 2 nor divisible by a known dimensions 247 
+
+like 172, 156, or 140. We first chose to add 8 dimensions, reaching 1542, which can be managed by 248 
+
+the Paley algorithm without excessive computational costs. This algorithm is also used for Qwen2.5 249 
+
+80 500 1000 1500 2000 2500 3000 3500 
+
+> Dimensions added
+> 45
+> 50
+> 55
+> 60
+> 65
+> AVG
+> Mistral-7B-Instruct-v0.3
+> Llama-2-7b-hf
+> Meta-Llama-3-8B
+> Mistral-7B-v0.1
+> Computational limit
+
+Figure 2: Effect of expanding dimensions on 6 benchmarks average (AVG) for different models in 3 bits WAKV quantization and the computational limit of Lemma 4.1. Due to memory constraints on GPU A100 we could not increase more than 2036 dimensions for LLaMA3-8B. 7B to generate a Hadamard matrix of dimension 3584 and expand MLP to 32 dimensions, enabling 250 
+
+the Qwen architecture to work with QuaRot. This process is applicable to any architecture and any 251 
+
+embedding dimension without increasing computational costs making this method very general. 252 
+
+We now study the impact of expanding dimensions on performance. Figure 2 show the evolution 253 
+
+of AVG with the number of dimensions added to our tokens and we clearly see the positive impact 254 
+
+on performances. We can reach 68.95% of accuracy for Mistral-7B Instruct but at a very high 255 
+
+computational cost. 256 
+
+Another beneficial aspect of dimension expansion is seen in Group Local Rotation, introduced in 257 
+
+QuaRot and explored in [ 16 ]. This technique involves decomposing a tensor into smaller sub-tensors 258 
+
+and applying the same small power-of-2 Hadamard matrix to each of these sub-tensors. This approach 259 
+
+leverages efficient Hadamard transforms (as introduced in Section 2.3.2) and significantly speeds 260 
+
+up inference. Particularly for MLP layers that often operate in high-dimensional spaces, expanding 261 
+
+dimensions can help identify a more suitable divisor, resulting in efficient power-of-2 sub-tensors. 262 
+
+## 6 Conclusion 263 
+
+In this work, we introduced an approach to optimize the quantization of LLMs using Gradual 264 
+
+Binary Search and Hadamard matrices. Our method achieves efficient 3-bit quantization for weights, 265 
+
+activations, and key-value caches, significantly improving model performance. We also theoretically 266 
+
+demonstrated that Hadamard matrices are more effective than random rotation matrices in reducing 267 
+
+extreme values in activations. 268 
+
+We also extended the use of rotation matrices to support non-power-of-2 embedding dimensions 269 
+
+using the Paley algorithm and dimension expansion. This generalization allows our method to be 270 
+
+applied to various architectures, including those with unique embedding dimensions. Experimental 271 
+
+results on models from the Mistral library, LLaMA architecture, and Qwen show the effectiveness of 272 
+
+our approach, outperforming existing methods. 273 
+
+Overall, our findings suggest that GBS and Hadamard matrices have great potential for advancing 274 
+
+LLM quantization, making them more suitable for resource-constrained devices. Future work will 275 
+
+explore mix computation and combining GBS with other methods. 276 
+
+## 7 Limitations 277 
+
+As explained in the previous part expanding dimensions has a big computational cost and it worsen 278 
+
+with context length that is why we need to be aware of the expanding limit. One potential solution is 279 
+
+to implement a Mixed Computation pipeline, where dimensions are only expanded in specific layers 280 
+
+based on the presence of outliers, thereby substantially reducing computational overhead. 281 
+
+Another challenge arises with GBS, which involves computing perplexity at each step—a process 282 
+
+that can be time-consuming for PTQ methods, sometimes taking several days. To mitigate this, we 283 
+
+could use less than 10% of WikiText2 which might be excessive and unnecessary. 284 
+
+9References 285 
+
+[1] Saleh Ashkboos, Maximilian L. Croci, Marcelo Gennari do Nascimento, Torsten Hoefler, and 286 
+
+James Hensman. SliceGPT: Compress Large Language Models by Deleting Rows and Columns, 287 
+
+February 2024. URL http://arxiv.org/abs/2401.15024 . arXiv:2401.15024. 288 
+
+[2] Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L. Croci, Bo Li, Pashmina Cameron, 289 
+
+Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. QuaRot: Outlier-Free 4-290 
+
+Bit Inference in Rotated LLMs, October 2024. URL http://arxiv.org/abs/2404.00456 .291 
+
+arXiv:2404.00456 [cs]. 292 
+
+[3] Jerry Chee, Volodymyr Kuleshov, and Yaohui Cai. QuIP: 2-Bit Quantization of Large Language 293 
+
+Models With Guarantees. 294 
+
+[4] Mengzhao Chen, Yi Liu, Jiahao Wang, Yi Bin, Wenqi Shao, and Ping Luo. PrefixQuant: 295 
+
+Static Quantization Beats Dynamic through Prefixed Outliers in LLMs, October 2024. URL 296 
+
+http://arxiv.org/abs/2410.05265 . arXiv:2410.05265. 297 
+
+[5] Jungwook Choi, Zhuo Wang, Swagath Venkataramani, Pierce I.-Jen Chuang, Vijayalak-298 
+
+shmi Srinivasan, and Kailash Gopalakrishnan. PACT: Parameterized Clipping Activation 299 
+
+for Quantized Neural Networks, July 2018. URL http://arxiv.org/abs/1805.06085 .300 
+
+arXiv:1805.06085 [cs]. 301 
+
+[6] Laurens De Haan and Ana Ferreira. Extreme Value Theory . Springer Series in Operations 302 
+
+Research and Financial Engineering. Springer, New York, NY, 2006. ISBN 978-0-387-23946-0 303 
+
+978-0-387-34471-3. doi: 10.1007/0-387-34471-3. URL http://link.springer.com/10. 304 
+
+1007/0-387-34471-3 .305 
+
+[7] Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. LLM.int8(): 8-bit Matrix 306 
+
+Multiplication for Transformers at Scale. 307 
+
+[8] Alexandre Défossez, Yossi Adi, and Gabriel Synnaeve. Differentiable Model Compression 308 
+
+via Pseudo Quantization Noise, October 2022. URL http://arxiv.org/abs/2104.09987 .309 
+
+arXiv:2104.09987 [cs, stat]. 310 
+
+[9] Steven K. Esser, Jeffrey L. McKinstry, Deepika Bablani, Rathinakumar Appuswamy, and 311 
+
+Dharmendra S. Modha. Learned Step Size Quantization, May 2020. URL http://arxiv. 312 
+
+org/abs/1902.08153 . arXiv:1902.08153 [cs, stat]. 313 
+
+[10] Giuseppe Franco, Pablo Monteagudo-Lago, Ian Colbert, Nicholas Fraser, and Michaela Blott. 314 
+
+Improving Quantization with Post-Training Model Expansion, March 2025. URL http: 315 
+
+//arxiv.org/abs/2503.17513 . arXiv:2503.17513 [cs]. 316 
+
+[11] Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. GPTQ: Accurate Post-317 
+
+Training Quantization for Generative Pre-trained Transformers, March 2023. URL http: 318 
+
+//arxiv.org/abs/2210.17323 . arXiv:2210.17323 [cs]. 319 
+
+[12] Amir Gholami, Sehoon Kim, Zhen Dong, Zhewei Yao, Michael W. Mahoney, and Kurt Keutzer. 320 
+
+A Survey of Quantization Methods for Efficient Neural Network Inference, June 2021. URL 321 
+
+http://arxiv.org/abs/2103.13630 . arXiv:2103.13630 [cs]. 322 
+
+[13] Yunhui Guo. A Survey on Methods and Theories of Quantized Neural Networks, December 323 
+
+2018. URL http://arxiv.org/abs/1808.04752 . arXiv:1808.04752 [cs, stat]. 324 
+
+[14] K. J. Horadam. Hadamard Matrices and Their Applications . Princeton University Press, January 325 
+
+2012. ISBN 978-1-4008-4290-2. Google-Books-ID: oR_HDgAAQBAJ. 326 
+
+[15] Xijie Huang, Zechun Liu, Shih-Yang Liu, and Kwang-Ting Cheng. RoLoRA: Fine-tuning 327 
+
+Rotated Outlier-free LLMs for Effective Weight-Activation Quantization, July 2024. URL 328 
+
+http://arxiv.org/abs/2407.08044 . arXiv:2407.08044 [cs]. 329 
+
+10 [16] Sangjin Kim, Yuseon Choi, Jungjun Oh, Byeongcheol Kim, and Hoi-Jun Yoo. LightRot: 330 
+
+A Light-weighted Rotation Scheme and Architecture for Accurate Low-bit Large Language 331 
+
+Model Inference. IEEE Journal on Emerging and Selected Topics in Circuits and Systems ,332 
+
+pages 1–1, 2025. ISSN 2156-3365. doi: 10.1109/JETCAS.2025.3558300. URL https: 333 
+
+//ieeexplore.ieee.org/document/10950449/ .334 
+
+[17] Haokun Lin, Haobo Xu, Yichen Wu, Jingzhi Cui, Yingtao Zhang, Linzhan Mou, Linqi Song, 335 
+
+Zhenan Sun, and Ying Wei. DuQuant: Distributing Outliers via Dual Transformation Makes 336 
+
+Stronger Quantized LLMs. 337 
+
+[18] Ji Lin, Chuang Gan, and Song Han. Defensive Quantization: When Efficiency Meets Robustness, 338 
+
+April 2019. URL http://arxiv.org/abs/1904.08444 . arXiv:1904.08444 [cs, stat]. 339 
+
+[19] Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman 340 
+
+Krishnamoorthi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. SpinQuant: LLM 341 
+
+quantization with learned rotations, May 2024. URL http://arxiv.org/abs/2405.16406 .342 
+
+arXiv:2405.16406 [cs]. 343 
+
+[20] Shuming Ma, Hongyu Wang, Lingxiao Ma, Lei Wang, Wenhui Wang, Shaohan Huang, 344 
+
+Li Dong, Ruiping Wang, Jilong Xue, and Furu Wei. The Era of 1-bit LLMs: All Large Lan-345 
+
+guage Models are in 1.58 Bits, February 2024. URL http://arxiv.org/abs/2402.17764 .346 
+
+arXiv:2402.17764 [cs]. 347 
+
+[21] Lucas Maisonnave, Cyril Moineau, Olivier Bichler, and Fabrice Rastello. Applying maximum 348 
+
+entropy principle on quantized neural networks correlates with high accuracy. 349 
+
+[22] Lucas Maisonnave, Cyril Moineau, Olivier Bichler, and Fabrice Rastello. Precision Where It 350 
+
+Matters: A Novel Spike Aware Mixed-Precision Quantization Strategy for LLaMA-based Lan-351 
+
+guage Models, April 2025. URL http://arxiv.org/abs/2504.21553 . arXiv:2504.21553 352 
+
+[cs]. 353 
+
+[23] Aniruddha Nrusimha, Mayank Mishra, Naigang Wang, Dan Alistarh, Rameswar Panda, and 354 
+
+Yoon Kim. Mitigating the Impact of Outlier Channels for Language Model Quantization 355 
+
+with Activation Regularization, April 2024. URL http://arxiv.org/abs/2404.03605 .356 
+
+arXiv:2404.03605 [cs] version: 1. 357 
+
+[24] Seungwoo Son, Wonpyo Park, Woohyun Han, Kyuyeun Kim, and Jaeho Lee. Pre-358 
+
+fixing Attention Sinks can Mitigate Activation Outliers for Large Language Model 359 
+
+Quantization. June 2024. URL https://www.semanticscholar.org/paper/ 360 
+
+1601ad7616681ed9d7e1b9a04b64c1ad9c7196c7 .361 
+
+[25] Roman Vershynin. High-Dimensional Probability: An Introduction with Applica-362 
+
+tions in Data Science . Cambridge Series in Statistical and Probabilistic Math-363 
+
+ematics. Cambridge University Press, Cambridge, 2018. ISBN 978-1-108-41519-364 
+
+4. doi: 10.1017/9781108231596. URL https://www.cambridge.org/core/books/ 365 
+
+highdimensional-probability/797C466DA29743D2C8213493BD2D2102 .366 
+
+[26] Hongyu Wang, Shuming Ma, Li Dong, Shaohan Huang, Huaijie Wang, Lingxiao Ma, Fan Yang, 367 
+
+Ruiping Wang, Yi Wu, and Furu Wei. BitNet: Scaling 1-bit Transformers for Large Language 368 
+
+Models, October 2023. URL http://arxiv.org/abs/2310.11453 . arXiv:2310.11453 [cs]. 369 
+
+[27] Xiuying Wei, Yunchen Zhang, Yuhang Li, Xiangguo Zhang, Ruihao Gong, Jinyang Guo, and 370 
+
+Xianglong Liu. Outlier Suppression+: Accurate quantization of large language models by 371 
+
+equivalent and optimal shifting and scaling, October 2023. URL http://arxiv.org/abs/ 372 
+
+2304.09145 . arXiv:2304.09145 [cs]. 373 
+
+[28] Jingyang Xiang and Sai Qian Zhang. DFRot: Achieving Outlier-Free and Massive Activation-374 
+
+Free for Rotated LLMs with Refined Rotation, December 2024. URL http://arxiv.org/ 375 
+
+abs/2412.00648 . arXiv:2412.00648 [cs]. 376 
+
+[29] Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. 377 
+
+SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models. 378 
+
+In Proceedings of the 40th International Conference on Machine Learning , pages 38087–38099. 379 
+
+11 PMLR, July 2023. URL https://proceedings.mlr.press/v202/xiao23c.html . ISSN: 380 
+
+2640-3498. 381 
+
+[30] Dawei Yang, Ning He, Xing Hu, Zhihang Yuan, Jiangyong Yu, Chen Xu, and Zhe Jiang. Post-382 
+
+Training Quantization for Re-parameterization via Coarse & Fine Weight Splitting, December 383 
+
+2023. URL http://arxiv.org/abs/2312.10588 . arXiv:2312.10588 [cs]. 384 
+
+[31] Linjie Yang and Qing Jin. FracBits: Mixed Precision Quantization via Fractional Bit-Widths. 385 
+
+Proceedings of the AAAI Conference on Artificial Intelligence , 35(12):10612–10620, May 2021. 386 
+
+ISSN 2374-3468, 2159-5399. doi: 10.1609/aaai.v35i12.17269. URL https://ojs.aaai. 387 
+
+org/index.php/AAAI/article/view/17269 .388 
+
+[32] Chenzhuo Zhu, Song Han, Huizi Mao, and William J. Dally. Trained Ternary Quantization, 389 
+
+February 2017. URL http://arxiv.org/abs/1612.01064 . arXiv:1612.01064 [cs]. 390 
+
+## A Theoretical proofs 391 
+
+A.1 Hadamard matrices 392 
+
+A.1.1 Proof 393 
+
+Proof of Lemma 3.1. We define a Hadamard matrix as a rotation matrix with values equal to 1 or 394 
+
+-1 only. By definition, the equality HH T = In must be respected, but without normalization, we 395 
+
+have HH T = nI n. If we decide to normalize this Hadamard matrix by a factor of 1√n , we obtain 396 
+
+the identity by multiplying it by its transpose. In the case of a vector x = ( c, ϵ, ..., ϵ )T with c >> ϵ ,397 
+
+applying a Hadamard matrix to it amounts to multiplying the maximum absolute value by 1√n since 398 
+
+all the values of H are either 1√n or − 1√n , hence the desired result. 399 
+
+Proof of Lemma 3.2. Let Q be a rotation matrix drawn on the unit sphere Sn−1. We assume that the problem is in high dimension, which allows us to approximate the distribution of the elements of the matrix Q:
+
+Qij ∼ N 
+
+
+
+0, 1
+
+n
+
+
+
+This theorem is a classic result of high-dimensional probability theory [ 25 ]. It is this result that allows 400 
+
+the entire demonstration, because it is from this approximation that we can use the fundamental 401 
+
+properties of the extreme values of a normal law. Indeed, for all i, j ≤ n, Z ij ∼ N (0 , 1) , then 402 
+
+Qij = Zij  
+
+> √n
+
+. We can show [6] that 403 
+
+E
+
+
+
+max  
+
+> 1≤i,j ≤n
+
+|Zij |
+
+
+
+= p2 log n (3) Therefore, 404 
+
+E
+
+
+
+max  
+
+> 1≤i,j ≤n
+
+|Qij |
+
+
+
+=
+
+r 2 log nn (4) Using Talagrand’s inequality for a Lipschitz function ( Qx is indeed a Lipschitz function) we have: 405 
+
+P max  
+
+> 1≤i,j ≤n
+
+|Qij | − 
+
+r 2 log nn > ϵ 
+
+!
+
+≤ 2e−Cnϵ 2
+
+(5) With C > 0. Thus, for sufficiently large n, we have a very high probability of having: 406 
+
+max  
+
+> 1≤i,j ≤n
+
+|Qij | =
+
+r 2 log nn (6) We now use this result when applying Q to a vector x = ( c, ϵ, ..., ϵ )T with c >> ϵ 
+
+max  
+
+> 1≤i≤n
+
+|(Qx )i| = c max  
+
+> 1≤i,j ≤n
+
+|Qij | = c
+
+r 2 log nn
+
+> 407
+
+12 Finally, using Lemmas 3.1 and 3.2, we show that for sufficiently large n
+
+max  
+
+> 1≤i≤n
+
+|(Hx )i| ≤ max  
+
+> 1≤i≤n
+
+|(Qx )i|
+
+We even show that we cannot do better than the Hadamard matrix to redistribute the energy of a 408 
+
+matrix. 409 
+
+Proof of Theorem 3.2. Let Q ∈ Rn×n be an orthogonal matrix. By definition, for any column i of this matrix: 
+
+|| Qi|| 2 = 1 ⇒ X
+
+> j
+
+|Qi,j |2 = 1 
+
+However, 410 
+
+X
+
+> j
+
+max  
+
+> p,k
+
+|Qp,k |2 ≥ X
+
+> j
+
+|Qi,j |2 (7) 
+
+⇒ X
+
+> j
+
+max  
+
+> p,k
+
+|Qp,k |2 ≥ 1 (8) 
+
+⇒ n ∗ max  
+
+> p,k
+
+|Qp,k |2 ≥ 1 (9) 
+
+⇒ max  
+
+> p,k
+
+|Qp,k | ≥ 1
+
+√n (10) We have just shown that an orthogonal matrix cannot reduce an outlier by more than a factor of 1√n ,411 
+
+and as seen with Lemma 3.1, a Hadamard matrix can reach this bound, it is therefore optimal. 412 
+
+A.1.2 Experimental Verifications 413 0 500 1000 1500 2000 2500 3000 3500 4000            
+
+> Dimension
+> 10
+> 20
+> 30
+> 40
+> 50
+> Absolute Value
+> Hadamard 1
+> n
+> exp
+> th
+> 0500 1000 1500 2000 2500 3000 3500 4000
+> Dimension
+> 20
+> 40
+> 60
+> 80
+> 100
+> 120
+> Absolute Value
+> Random Orthogonal 2log nn
+> exp
+> th
+
+Figure 3: Maximum absolute value as a function of dimension for a randomly drawn rotation matrix and a Hadamard matrix applied to a vector containing a peak at 200 obtained experimentally (blue) and theoretically (red) To verify the previous theoretical results, we set up a simple experiment where we apply a randomly 414 
+
+drawn rotation matrix and a Hadamard matrix to a vector of dimension n following a standard normal 415 
+
+distribution with a standard deviation of 0.1 to which we add a peak at 200. We plot the curve of the 416 
+
+maximum absolute value after applying our matrices as a function of the dimension n as well as the 417 
+
+theoretical curve in Figue 3. 418 
+
+It clearly shows that the theoretical and experimental curves follow each other perfectly, which seems 419 
+
+to confirm the previously demonstrated theorems. Hadamard matrices are therefore theoretically and 420 
+
+experimentally the most suitable matrices for reducing the impact of an outlier in a vector. 421 
+
+13 A.2 Increasing dimensions 422 
+
+Proof of Lemma 4.1. We define BitOps as the function that compute the number of operations for a 423 
+
+matrix multiplication: BitOps (AB ) = mn 2pb 2. And we want to find a condition that ensure 424 
+
+BitOps (A′B′) ≤ BitOps (AB ) (11) 
+
+⇒ m(n + d)2pb ′2 ≤ mn 2pb 2 (12) 
+
+⇒ (n + d)2b′2 ≤ n2b2 (13) 
+
+⇒ (n + d)b′ ≤ nb (14) 
+
+⇒ nb ′ + db ′ ≤ nb (15) 
+
+⇒ d ≤ n(b − b′)
+
+b′ (16) 
+
+> 425
+
+## B Paley Algorithm 426 
+
+Algorithm 2 Hadamard Matrix Construction using the Paley Method 
+
+Require: A prime number p
+
+Ensure: A Hadamard matrix H of order p + 1  
+
+> 1:
+
+n ← p + 1 ▷ Determine the order of the matrix  
+
+> 2:
+
+Initialize H as a n × n matrix with all entries set to 1 ▷ Start with a matrix of all ones  
+
+> 3:
+
+for i ← 1 to n − 1 do ▷ Loop over rows (except the first row)  
+
+> 4:
+
+H[i, 0] ← − 1 ▷ Set the first column entry to -1 for current row  
+
+> 5:
+
+H[0 , i ] ← − 1 ▷ Set the first row entry to -1 for current column  
+
+> 6:
+
+for j ← 1 to n − 1 do ▷ Loop over columns (except the first column)  
+
+> 7:
+
+if i = j then  
+
+> 8:
+
+H[i, j ] ← − 1 ▷ Set diagonal entries to -1  
+
+> 9:
+
+else  
+
+> 10:
+
+H[i, j ] ← legendre_symbol (( i − 1) − (j − 1) , p ) 
+
+> 11:
+
+end if  
+
+> 12:
+
+end for  
+
+> 13:
+
+end for  
+
+> 14:
+
+return H ▷ Return the constructed Hadamard matrix 
+
+## C Gradual Binary Search process 427 
+
+In this analysis, we examine the evolution of clipping ratios through GBS to better understand the 428 
+
+dynamics of these parameters in LLMs. Figure 4 illustrates the perplexity (PPL) evolution during 429 
+
+the optimization of a LLaMA3-8B model quantized to 4 bits. The graph displays the various tested 430 
+
+values for each projection, optimized under two different configurations: starting the model in FP16 431 
+
+(blue line) and initiating the process in 4 bits. It is clear that starting in FP16 yields a better PPL on 432 
+
+the training set of WikiText2, achieving 7.62, compared to starting in 4 bits, which results in a PPL of 433 
+
+7.94. On the test set we have the same dynamic with a PPL of 7.4 starting in FP16 and 7.69 starting 434 
+
+in 4 bits. 435 
+
+Figure 5 illustrates the final configuration achieved by GBS for the same architecture, starting the 436 
+
+process in both FP16 and 4-bit precision. It is clear that initiating in 4 bits results in a significantly 437 
+
+more unstable configuration compared to starting in FP16. Many values remain at 1, and there is a 438 
+
+high variance, indicating that the algorithm struggles to find a stable configuration when the entire 439 
+
+model is in 4 bits. It also appears to have difficulty understanding the impact of small changes in the 440 
+
+clipping ratio. 441 
+
+In contrast, starting in FP16 results in a stable configuration for every projection, with distinct 442 
+
+dynamics. For instance, the qk_rotation projection exhibits minimal changes in the clipping ratio, 443 
+
+with most layers close to 1. Conversely, the o_proj projection has values below 0.3, suggesting 444 
+
+14 0 5 10 15 20 25 30 
+
+Layer 
+
+> 8.0
+> 8.2
+> 8.4
+> 8.6
+> 8.8
+> 9.0
+> PPL
+
+(a) GBS starting in 4 bits 0 5 10 15 20 25 30 
+
+Layer  
+
+> 6.8
+> 7.0
+> 7.2
+> 7.4
+> 7.6
+> 7.8
+> PPL
+> Projections
+> q_proj
+> k_proj
+> v_proj
+> qk_rotation
+> o_proj
+> gate_proj
+> up_proj
+> down_proj
+
+(b) GBS starting in FP16 
+
+Figure 4: PPL vs Layer during Gradual Binary Search on 10% of Train WikiText2 for a LLaMA3-8B in 4-bit quantization and rotated with QuaRot. For better visualization we set a maximum PPL to 9. Points opacity represents the clipping ratio, the value is closer to 0 as transparency increases that clipping to 30% of the maximum value can enhance performance. This figure underscores the 445 
+
+importance of GBS in improving the model’s quality by identifying the optimal clipping configuration, 446 
+
+which is clearly not only ones. 447 0 5 10 15 20 25 30 
+
+Layer 
+
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> 1.0
+> Clipping ratio
+> Projections
+> q_proj
+> k_proj
+> v_proj
+> qk_rotation
+> o_proj
+> gate_proj
+> up_proj
+> down_proj
+
+(a) GBS starting in FP16 0 5 10 15 20 25 30 
+
+Layer  
+
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> 1.0
+> Clipping ratio
+> Projections
+> q_proj
+> k_proj
+> v_proj
+> qk_rotation
+> o_proj
+> gate_proj
+> up_proj
+> down_proj
+
+(b) GBS starting in 4 bits 
+
+Figure 5: Final configurations obtained with GBS started in 4 bits and in FP16 for a LLaMA3-8B 
+
+## D Perplexity as objective 448 
+
+Perplexity is the central part of our optimization, it drives our search and it is supposed to reach a 449 
+
+configuration which will performs better than all others with a bigger PPL. In figure 6 we can see 450 
+
+how the average value on 6 benchmarks evolves with the perplexity. It clearly appears that a smaller 451 
+
+PPL usually represents a better AVG. 452 10 1 10 2 10 3
+
+> Perplexity [log]
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> AVG
+
+Figure 6: AVG over Perplexity for all results obtained in Tab 2 and 1 15 E More results 453 
+
+E.1 SpinQuant 454 
+
+Table 3: Results in 4 bits WAKV quantization on perplexity (PPL), PIQA, hellaswag (HS), arc-easy (ARC-E), arc-challenge (ARC-C), winogrande (WINO) and lambada, we also compute the average value (AVG) which represents a % of success. We compare our method, GBS, with SpinQuant and clearly observe that GBS outperforms SpinQuant across almost all computed metrics. 
+
+Model Method PPL ↓ PIQA HS ARC-E ARC-C Wino Lambada AVG ↑
+
+Mistral 7B Inst v0.3 FP16 5.49 71.27 74.6 67.94 74.27 58.96 82.66 71.62 SpinQuant 5.88 69 72.66 65.34 69.93 55.12 78.41 68.41 SpinQuant + GBS 5.83 69.01 72.66 65.36 72.14 56.91 79.5 69.26 
+
+Mistral 7B v0.1 FP16 5.25 72.49 75.59 69.4 73.95 54.86 80.18 71.08 SpinQuant 5.71 69.55 73.45 65.65 69.38 48.98 76.98 67.33 SpinQuant + GBS 5.62 70.02 73.37 66.66 71.19 48.29 76.47 67.67 
+
+Llama2 7B FP16 5.47 71.08 73.9 68.25 68.98 46.33 74.58 67.19 SpinQuant 6.57 61.73 68.46 55.0 63.46 40.61 67.63 59.48 SpinQuant + GBS 6.15 63.24 69.01 57.46 65.04 41.04 68.43 60.7 
+
+Llama3 8B FP16 6.13 72.62 76.01 69.22 72.93 53.41 77.69 70.3 SpinQuant 7.97 65.11 69.01 61.21 66.61 45.22 72.52 63.28 SpinQuant + GBS 7.69 63.84 67.84 59.83 70.4 47.35 73.36 63.77 
+
+> 455
+
+Table 4: Results in 3 bits WAKV quantization on perplexity (PPL), PIQA, hellaswag (HS), arc-easy (ARC-E), arc-challenge (ARC-C), winogrande (WINO) and lambada, we also compute the average value (AVG) which represents a % of success. We compare our method, GBS, with SpinQuant and clearly observe that GBS outperforms SpinQuant across almost all computed metrics. 
+
+Model Method PPL ↓ PIQA HS ARC-E ARC-C Wino Lambada AVG ↑
+
+Mistral 7B Inst v0.3 FP16 5.49 71.27 74.6 67.94 74.27 58.96 82.66 71.62 SpinQuant 14.31 20.39 28.39 12.38 49.72 24.57 40.57 29.34 SpinQuant + GBS 8.11 52.93 58.99 46.87 60.06 40.78 66.67 54.38 
+
+Mistral 7B v0.1 FP16 5.25 72.49 75.59 69.4 73.95 54.86 80.18 71.08 SpinQuant 18.88 16.58 21.97 11.2 51.3 24.23 37.67 27.16 SpinQuant + GBS 7.98 52.81 60.59 45.04 59.27 35.67 63.68 52.84 
+
+Llama2 7B FP16 5.47 71.08 73.9 68.25 68.98 46.33 74.58 67.19 SpinQuant 425.2 0.24 0.45 0.04 51.46 28.33 27.57 18.02 SpinQuant + GBS 15.65 20.77 26.51 15.04 50.67 26.19 42.93 30.35 
+
+Llama3 8B FP16 6.13 72.62 76.01 69.22 72.93 53.41 77.69 70.3 SpinQuant 316.6 2.71 3.1 2.31 50.51 22.35 29.0 18.33 SpinQuant + GBS 20.26 21.42 23.95 18.9 54.38 26.96 43.1 31.45 
+
+> 456
+
+16 E.2 DFRot 457 
+
+Table 5: Results in 4 bits WAKV quantization on perplexity (PPL), PIQA, hellaswag (HS), arc-easy (ARC-E), arc-challenge (ARC-C), winogrande (WINO) and lambada, we also compute the average value (AVG) which represents a % of success. We compare our method, GBS, with DFRot and clearly observe that GBS outperforms DFRot across all computed metrics. 
+
+Model Method PPL ↓ PIQA HS ARC-E ARC-C Wino Lambada AVG ↑
+
+Mistral 7B Inst v0.3 FP16 5.49 71.27 74.6 67.94 74.27 58.96 82.66 71.62 DFRot 5.94 68.11 79.43 68.5 72.42 64.58 80.3 72.22 DFRot + GBS 5.81 71.35 81.23 69.3 73.18 65.42 80.13 73.43 
+
+Mistral 7B v0.1 FP16 5.25 72.49 75.59 69.4 73.95 54.86 80.18 71.08 DFRot 5.75 71.03 78.94 69.83 74.03 65.63 78.28 72.96 DFRot + GBS 5.62 70.88 80.9 70.93 75.0 66.85 78.85 73.9 
+
+Llama2 7B FP16 5.47 71.08 73.9 68.25 68.98 46.33 74.58 67.19 DFRot 6.23 65.04 76.66 65.75 69.47 62.02 72.61 68.59 DFRot + GBS 6.05 65.67 77.75 66.41 69.63 63.19 72.74 69.23 
+
+Llama3 8B FP16 6.13 72.62 76.01 69.22 72.93 53.41 77.69 70.3 DFRot 7.95 68.11 76.01 64.92 68.5 61.34 74.17 68.84 DFRot + GBS 7.56 72.53 76.82 66.35 69.53 63.17 75.0 70.57 
+
+> 458
+
+Table 6: Results in 3 bits WAKV quantization on perplexity (PPL), PIQA, hellaswag (HS), arc-easy (ARC-E), arc-challenge (ARC-C), winogrande (WINO) and lambada, we also compute the average value (AVG) which represents a % of success. We compare our method, GBS, with DFRot and clearly observe that GBS outperforms DFRot across all computed metrics. 
+
+Model Method PPL ↓ PIQA HS ARC-E ARC-C Wino Lambada AVG ↑
+
+Mistral 7B Inst v0.3 FP16 5.49 71.27 74.6 67.94 74.27 58.96 82.66 71.62 DFRot 11.26 53.28 67.57 35.6 40.33 30.88 57.57 47.54 DFRot + GBS 7.58 63.22 75.35 59.32 65.19 53.46 71.73 64.71 
+
+Mistral 7B v0.1 FP16 5.25 72.49 75.59 69.4 73.95 54.86 80.18 71.08 DFRot 13.63 55.01 65.45 27.89 32.52 23.25 50.63 42.46 DFRot + GBS 7.64 62.83 73.72 56.99 64.33 49.64 68.12 62.6 
+
+Llama2 7B FP16 5.47 71.08 73.9 68.25 68.98 46.33 74.58 67.19 DFRot 26.64 49.96 58.81 13.19 14.81 11.57 39.14 31.25 DFRot + GBS 10.96 56.12 66.81 34.43 40.4 28.45 55.01 46.87 
+
+Llama3 8B FP16 6.13 72.62 76.01 69.22 72.93 53.41 77.69 70.3 DFRot 140.78 52.41 54.62 2.82 3.38 2.27 31.85 24.56 DFRot + GBS 22.14 54.85 61.92 25.53 29.58 21.48 48.67 40.34 
+
+> 459
+
+17 NeurIPS Paper Checklist 460 
+
+1. Claims 461 
+
+Question: Do the main claims made in the abstract and introduction accurately reflect the 462 
+
+paper’s contributions and scope? 463 
+
+Answer: [Yes] 464 
+
+Justification: We wrote our abstract at the end so every claim in the abstract perfectly 465 
+
+represents what we showed in the paper 466 
+
+Guidelines: 467 
+
+• The answer NA means that the abstract and introduction do not include the claims 468 
+
+made in the paper. 469 
+
+• The abstract and/or introduction should clearly state the claims made, including the 470 
+
+contributions made in the paper and important assumptions and limitations. A No or 471 
+
+NA answer to this question will not be perceived well by the reviewers. 472 
+
+• The claims made should match theoretical and experimental results, and reflect how 473 
+
+much the results can be expected to generalize to other settings. 474 
+
+• It is fine to include aspirational goals as motivation as long as it is clear that these goals 475 
+
+are not attained by the paper. 476 
+
+2. Limitations 477 
+
+Question: Does the paper discuss the limitations of the work performed by the authors? 478 
+
+Answer: [Yes] 479 
+
+Justification: We have a section dedicated to limitations in this paper 480 
+
+Guidelines: 481 
+
+• The answer NA means that the paper has no limitation while the answer No means that 482 
+
+the paper has limitations, but those are not discussed in the paper. 483 
+
+• The authors are encouraged to create a separate "Limitations" section in their paper. 484 
+
+• The paper should point out any strong assumptions and how robust the results are to 485 
+
+violations of these assumptions (e.g., independence assumptions, noiseless settings, 486 
+
+model well-specification, asymptotic approximations only holding locally). The authors 487 
+
+should reflect on how these assumptions might be violated in practice and what the 488 
+
+implications would be. 489 
+
+• The authors should reflect on the scope of the claims made, e.g., if the approach was 490 
+
+only tested on a few datasets or with a few runs. In general, empirical results often 491 
+
+depend on implicit assumptions, which should be articulated. 492 
+
+• The authors should reflect on the factors that influence the performance of the approach. 493 
+
+For example, a facial recognition algorithm may perform poorly when image resolution 494 
+
+is low or images are taken in low lighting. Or a speech-to-text system might not be 495 
+
+used reliably to provide closed captions for online lectures because it fails to handle 496 
+
+technical jargon. 497 
+
+• The authors should discuss the computational efficiency of the proposed algorithms 498 
+
+and how they scale with dataset size. 499 
+
+• If applicable, the authors should discuss possible limitations of their approach to 500 
+
+address problems of privacy and fairness. 501 
+
+• While the authors might fear that complete honesty about limitations might be used by 502 
+
+reviewers as grounds for rejection, a worse outcome might be that reviewers discover 503 
+
+limitations that aren’t acknowledged in the paper. The authors should use their best 504 
+
+judgment and recognize that individual actions in favor of transparency play an impor-505 
+
+tant role in developing norms that preserve the integrity of the community. Reviewers 506 
+
+will be specifically instructed to not penalize honesty concerning limitations. 507 
+
+3. Theory assumptions and proofs 508 
+
+Question: For each theoretical result, does the paper provide the full set of assumptions and 509 
+
+a complete (and correct) proof? 510 
+
+Answer: [Yes] 511 
+
+18 Justification: In this paper we proved the efficiency of Hadamard matrices to reduce outliers 512 
+
+in a tensor over random orthogonal matrices and we linked it to dimension of tokens. The 513 
+
+proof is clearly explained in appendix A by using 2 established theorems of high dimension 514 
+
+theory and extreme values theory which can also be added if needed. 515 
+
+Guidelines: 516 
+
+• The answer NA means that the paper does not include theoretical results. 517 
+
+• All the theorems, formulas, and proofs in the paper should be numbered and cross-518 
+
+referenced. 519 
+
+• All assumptions should be clearly stated or referenced in the statement of any theorems. 520 
+
+• The proofs can either appear in the main paper or the supplemental material, but if 521 
+
+they appear in the supplemental material, the authors are encouraged to provide a short 522 
+
+proof sketch to provide intuition. 523 
+
+• Inversely, any informal proof provided in the core of the paper should be complemented 524 
+
+by formal proofs provided in appendix or supplemental material. 525 
+
+• Theorems and Lemmas that the proof relies upon should be properly referenced. 526 
+
+4. Experimental result reproducibility 527 
+
+Question: Does the paper fully disclose all the information needed to reproduce the main ex-528 
+
+perimental results of the paper to the extent that it affects the main claims and/or conclusions 529 
+
+of the paper (regardless of whether the code and data are provided or not)? 530 
+
+Answer: [Yes] 531 
+
+Justification: Every details to reproduce our results are clearly explained in the paper, 532 
+
+especially is section 5.1 where we explain every parameter to configure. Every dataset, 533 
+
+models and benchmarks can be accessed easily and freely. Our main contribution GBS is 534 
+
+clearly explained and can be implemented by the reader if needed. 535 
+
+Guidelines: 536 
+
+• The answer NA means that the paper does not include experiments. 537 
+
+• If the paper includes experiments, a No answer to this question will not be perceived 538 
+
+well by the reviewers: Making the paper reproducible is important, regardless of 539 
+
+whether the code and data are provided or not. 540 
+
+• If the contribution is a dataset and/or model, the authors should describe the steps taken 541 
+
+to make their results reproducible or verifiable. 542 
+
+• Depending on the contribution, reproducibility can be accomplished in various ways. 543 
+
+For example, if the contribution is a novel architecture, describing the architecture fully 544 
+
+might suffice, or if the contribution is a specific model and empirical evaluation, it may 545 
+
+be necessary to either make it possible for others to replicate the model with the same 546 
+
+dataset, or provide access to the model. In general. releasing code and data is often 547 
+
+one good way to accomplish this, but reproducibility can also be provided via detailed 548 
+
+instructions for how to replicate the results, access to a hosted model (e.g., in the case 549 
+
+of a large language model), releasing of a model checkpoint, or other means that are 550 
+
+appropriate to the research performed. 551 
+
+• While NeurIPS does not require releasing code, the conference does require all submis-552 
+
+sions to provide some reasonable avenue for reproducibility, which may depend on the 553 
+
+nature of the contribution. For example 554 
+
+(a) If the contribution is primarily a new algorithm, the paper should make it clear how 555 
+
+to reproduce that algorithm. 556 
+
+(b) If the contribution is primarily a new model architecture, the paper should describe 557 
+
+the architecture clearly and fully. 558 
+
+(c) If the contribution is a new model (e.g., a large language model), then there should 559 
+
+either be a way to access this model for reproducing the results or a way to reproduce 560 
+
+the model (e.g., with an open-source dataset or instructions for how to construct 561 
+
+the dataset). 562 
+
+(d) We recognize that reproducibility may be tricky in some cases, in which case 563 
+
+authors are welcome to describe the particular way they provide for reproducibility. 564 
+
+In the case of closed-source models, it may be that access to the model is limited in 565 
+
+19 some way (e.g., to registered users), but it should be possible for other researchers 566 
+
+to have some path to reproducing or verifying the results. 567 
+
+5. Open access to data and code 568 
+
+Question: Does the paper provide open access to the data and code, with sufficient instruc-569 
+
+tions to faithfully reproduce the main experimental results, as described in supplemental 570 
+
+material? 571 
+
+Answer[No] 572 
+
+Justification: We can’t publish our code yet due to institutional constraints but we plan to 573 
+
+release it if the paper is accepted. 574 
+
+Guidelines: 575 
+
+• The answer NA means that paper does not include experiments requiring code. 576 
+
+• Please see the NeurIPS code and data submission guidelines ( https://nips.cc/ 577 
+
+public/guides/CodeSubmissionPolicy ) for more details. 578 
+
+• While we encourage the release of code and data, we understand that this might not be 579 
+
+possible, so “No” is an acceptable answer. Papers cannot be rejected simply for not 580 
+
+including code, unless this is central to the contribution (e.g., for a new open-source 581 
+
+benchmark). 582 
+
+• The instructions should contain the exact command and environment needed to run to 583 
+
+reproduce the results. See the NeurIPS code and data submission guidelines ( https: 584 
+
+//nips.cc/public/guides/CodeSubmissionPolicy ) for more details. 585 
+
+• The authors should provide instructions on data access and preparation, including how 586 
+
+to access the raw data, preprocessed data, intermediate data, and generated data, etc. 587 
+
+• The authors should provide scripts to reproduce all experimental results for the new 588 
+
+proposed method and baselines. If only a subset of experiments are reproducible, they 589 
+
+should state which ones are omitted from the script and why. 590 
+
+• At submission time, to preserve anonymity, the authors should release anonymized 591 
+
+versions (if applicable). 592 
+
+• Providing as much information as possible in supplemental material (appended to the 593 
+
+paper) is recommended, but including URLs to data and code is permitted. 594 
+
+6. Experimental setting/details 595 
+
+Question: Does the paper specify all the training and test details (e.g., data splits, hyper-596 
+
+parameters, how they were chosen, type of optimizer, etc.) necessary to understand the 597 
+
+results? 598 
+
+Answer: [Yes] 599 
+
+Justification: Every hyper parameter setting is explained in section 5.1 and the base code 600 
+
+QuaRot is accessible online. 601 
+
+Guidelines: 602 
+
+• The answer NA means that the paper does not include experiments. 603 
+
+• The experimental setting should be presented in the core of the paper to a level of detail 604 
+
+that is necessary to appreciate the results and make sense of them. 605 
+
+• The full details can be provided either with the code, in appendix, or as supplemental 606 
+
+material. 607 
+
+7. Experiment statistical significance 608 
+
+Question: Does the paper report error bars suitably and correctly defined or other appropriate 609 
+
+information about the statistical significance of the experiments? 610 
+
+Answer: [No] 611 
+
+Justification: We don’t report error bars due to computational cost but we provide a signifi-612 
+
+cant number of experiments to support our claims. 613 
+
+Guidelines: 614 
+
+• The answer NA means that the paper does not include experiments. 615 
+
+20 • The authors should answer "Yes" if the results are accompanied by error bars, confi-616 
+
+dence intervals, or statistical significance tests, at least for the experiments that support 617 
+
+the main claims of the paper. 618 
+
+• The factors of variability that the error bars are capturing should be clearly stated (for 619 
+
+example, train/test split, initialization, random drawing of some parameter, or overall 620 
+
+run with given experimental conditions). 621 
+
+• The method for calculating the error bars should be explained (closed form formula, 622 
+
+call to a library function, bootstrap, etc.) 623 
+
+• The assumptions made should be given (e.g., Normally distributed errors). 624 
+
+• It should be clear whether the error bar is the standard deviation or the standard error 625 
+
+of the mean. 626 
+
+• It is OK to report 1-sigma error bars, but one should state it. The authors should 627 
+
+preferably report a 2-sigma error bar than state that they have a 96% CI, if the hypothesis 628 
+
+of Normality of errors is not verified. 629 
+
+• For asymmetric distributions, the authors should be careful not to show in tables or 630 
+
+figures symmetric error bars that would yield results that are out of range (e.g. negative 631 
+
+error rates). 632 
+
+• If error bars are reported in tables or plots, The authors should explain in the text how 633 
+
+they were calculated and reference the corresponding figures or tables in the text. 634 
+
+8. Experiments compute resources 635 
+
+Question: For each experiment, does the paper provide sufficient information on the com-636 
+
+puter resources (type of compute workers, memory, time of execution) needed to reproduce 637 
+
+the experiments? 638 
+
+Answer: [Yes] 639 
+
+Justification: We provide this information in section 5.1 where we explain we only use one 640 
+
+GPU A100 for all our experiments. 641 
+
+Guidelines: 642 
+
+• The answer NA means that the paper does not include experiments. 643 
+
+• The paper should indicate the type of compute workers CPU or GPU, internal cluster, 644 
+
+or cloud provider, including relevant memory and storage. 645 
+
+• The paper should provide the amount of compute required for each of the individual 646 
+
+experimental runs as well as estimate the total compute. 647 
+
+• The paper should disclose whether the full research project required more compute 648 
+
+than the experiments reported in the paper (e.g., preliminary or failed experiments that 649 
+
+didn’t make it into the paper). 650 
+
+9. Code of ethics 651 
+
+Question: Does the research conducted in the paper conform, in every respect, with the 652 
+
+NeurIPS Code of Ethics https://neurips.cc/public/EthicsGuidelines ?653 
+
+Answer: [Yes] 654 
+
+Justification: Our paper respect every aspect of these ethics guidlines 655 
+
+Guidelines: 656 
+
+• The answer NA means that the authors have not reviewed the NeurIPS Code of Ethics. 657 
+
+• If the authors answer No, they should explain the special circumstances that require a 658 
+
+deviation from the Code of Ethics. 659 
+
+• The authors should make sure to preserve anonymity (e.g., if there is a special consid-660 
+
+eration due to laws or regulations in their jurisdiction). 661 
+
+10. Broader impacts 662 
+
+Question: Does the paper discuss both potential positive societal impacts and negative 663 
+
+societal impacts of the work performed? 664 
+
+Answer: [NA] 665 
+
+Justification: This paper doesn’t have any societal impact 666 
+
+21 Guidelines: 667 
+
+• The answer NA means that there is no societal impact of the work performed. 668 
+
+• If the authors answer NA or No, they should explain why their work has no societal 669 
+
+impact or why the paper does not address societal impact. 670 
+
+• Examples of negative societal impacts include potential malicious or unintended uses 671 
+
+(e.g., disinformation, generating fake profiles, surveillance), fairness considerations 672 
+
+(e.g., deployment of technologies that could make decisions that unfairly impact specific 673 
+
+groups), privacy considerations, and security considerations. 674 
+
+• The conference expects that many papers will be foundational research and not tied 675 
+
+to particular applications, let alone deployments. However, if there is a direct path to 676 
+
+any negative applications, the authors should point it out. For example, it is legitimate 677 
+
+to point out that an improvement in the quality of generative models could be used to 678 
+
+generate deepfakes for disinformation. On the other hand, it is not needed to point out 679 
+
+that a generic algorithm for optimizing neural networks could enable people to train 680 
+
+models that generate Deepfakes faster. 681 
+
+• The authors should consider possible harms that could arise when the technology is 682 
+
+being used as intended and functioning correctly, harms that could arise when the 683 
+
+technology is being used as intended but gives incorrect results, and harms following 684 
+
+from (intentional or unintentional) misuse of the technology. 685 
+
+• If there are negative societal impacts, the authors could also discuss possible mitigation 686 
+
+strategies (e.g., gated release of models, providing defenses in addition to attacks, 687 
+
+mechanisms for monitoring misuse, mechanisms to monitor how a system learns from 688 
+
+feedback over time, improving the efficiency and accessibility of ML). 689 
+
+11. Safeguards 690 
+
+Question: Does the paper describe safeguards that have been put in place for responsible 691 
+
+release of data or models that have a high risk for misuse (e.g., pretrained language models, 692 
+
+image generators, or scraped datasets)? 693 
+
+Answer: [NA] 694 
+
+Justification: In our paper we use already available open models and datasets and we don’t 695 
+
+modify their architecture. 696 
+
+Guidelines: 697 
+
+• The answer NA means that the paper poses no such risks. 698 
+
+• Released models that have a high risk for misuse or dual-use should be released with 699 
+
+necessary safeguards to allow for controlled use of the model, for example by requiring 700 
+
+that users adhere to usage guidelines or restrictions to access the model or implementing 701 
+
+safety filters. 702 
+
+• Datasets that have been scraped from the Internet could pose safety risks. The authors 703 
+
+should describe how they avoided releasing unsafe images. 704 
+
+• We recognize that providing effective safeguards is challenging, and many papers do 705 
+
+not require this, but we encourage authors to take this into account and make a best 706 
+
+faith effort. 707 
+
+12. Licenses for existing assets 708 
+
+Question: Are the creators or original owners of assets (e.g., code, data, models), used in 709 
+
+the paper, properly credited and are the license and terms of use explicitly mentioned and 710 
+
+properly respected? 711 
+
+Answer: [Yes] 712 
+
+Justification: Every dataset or models are correctly credited in this paper and available on 713 
+
+huggingface. 714 
+
+Guidelines: 715 
+
+• The answer NA means that the paper does not use existing assets. 716 
+
+• The authors should cite the original paper that produced the code package or dataset. 717 
+
+• The authors should state which version of the asset is used and, if possible, include a 718 
+
+URL. 719 
+
+22 • The name of the license (e.g., CC-BY 4.0) should be included for each asset. 720 
+
+• For scraped data from a particular source (e.g., website), the copyright and terms of 721 
+
+service of that source should be provided. 722 
+
+• If assets are released, the license, copyright information, and terms of use in the 723 
+
+package should be provided. For popular datasets, paperswithcode.com/datasets 724 
+
+has curated licenses for some datasets. Their licensing guide can help determine the 725 
+
+license of a dataset. 726 
+
+• For existing datasets that are re-packaged, both the original license and the license of 727 
+
+the derived asset (if it has changed) should be provided. 728 
+
+• If this information is not available online, the authors are encouraged to reach out to 729 
+
+the asset’s creators. 730 
+
+13. New assets 731 
+
+Question: Are new assets introduced in the paper well documented and is the documentation 732 
+
+provided alongside the assets? 733 
+
+Answer: [Yes] 734 
+
+Justification: Every assets we used can be accessed freely online. 735 
+
+Guidelines: 736 
+
+• The answer NA means that the paper does not release new assets. 737 
+
+• Researchers should communicate the details of the dataset/code/model as part of their 738 
+
+submissions via structured templates. This includes details about training, license, 739 
+
+limitations, etc. 740 
+
+• The paper should discuss whether and how consent was obtained from people whose 741 
+
+asset is used. 742 
+
+• At submission time, remember to anonymize your assets (if applicable). You can either 743 
+
+create an anonymized URL or include an anonymized zip file. 744 
+
+14. Crowdsourcing and research with human subjects 745 
+
+Question: For crowdsourcing experiments and research with human subjects, does the paper 746 
+
+include the full text of instructions given to participants and screenshots, if applicable, as 747 
+
+well as details about compensation (if any)? 748 
+
+Answer: [NA] 749 
+
+Justification: We don’t involve human subjects in this paper. 750 
+
+Guidelines: 751 
+
+• The answer NA means that the paper does not involve crowdsourcing nor research with 752 
+
+human subjects. 753 
+
+• Including this information in the supplemental material is fine, but if the main contribu-754 
+
+tion of the paper involves human subjects, then as much detail as possible should be 755 
+
+included in the main paper. 756 
+
+• According to the NeurIPS Code of Ethics, workers involved in data collection, curation, 757 
+
+or other labor should be paid at least the minimum wage in the country of the data 758 
+
+collector. 759 
+
+15. Institutional review board (IRB) approvals or equivalent for research with human 760 
+
+subjects 761 
+
+Question: Does the paper describe potential risks incurred by study participants, whether 762 
+
+such risks were disclosed to the subjects, and whether Institutional Review Board (IRB) 763 
+
+approvals (or an equivalent approval/review based on the requirements of your country or 764 
+
+institution) were obtained? 765 
+
+Answer: [NA] 766 
+
+Justification: We don’t involve human subjects in this paper. 767 
+
+Guidelines: 768 
+
+• The answer NA means that the paper does not involve crowdsourcing nor research with 769 
+
+human subjects. 770 
+
+23 • Depending on the country in which research is conducted, IRB approval (or equivalent) 771 
+
+may be required for any human subjects research. If you obtained IRB approval, you 772 
+
+should clearly state this in the paper. 773 
+
+• We recognize that the procedures for this may vary significantly between institutions 774 
+
+and locations, and we expect authors to adhere to the NeurIPS Code of Ethics and the 775 
+
+guidelines for their institution. 776 
+
+• For initial submissions, do not include any information that would break anonymity (if 777 
+
+applicable), such as the institution conducting the review. 778 
+
+16. Declaration of LLM usage 779 
+
+Question: Does the paper describe the usage of LLMs if it is an important, original, or 780 
+
+non-standard component of the core methods in this research? Note that if the LLM is used 781 
+
+only for writing, editing, or formatting purposes and does not impact the core methodology, 782 
+
+scientific rigorousness, or originality of the research, declaration is not required. 783 
+
+Answer: [NA] 784 
+
+Justification: We used LLMs only for formatting purpose 785 
+
+Guidelines: 786 
+
+• The answer NA means that the core method development in this research does not 787 
+
+involve LLMs as any important, original, or non-standard components. 788 
+
+• Please refer to our LLM policy ( https://neurips.cc/Conferences/2025/LLM )789 
+
+for what should or should not be described. 790 
+
+24

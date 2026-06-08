@@ -1,0 +1,1883 @@
+Title: 640_StatsMerging_Statistics_Gu.pdf
+
+URL Source: https://openreview.net/pdf?id=4PZMjjElQz
+
+Number of Pages: 19
+
+Markdown Content:
+# StatsMerging : Statistics-Guided Model Merging via Task-Specific Teacher Distillation 
+
+Anonymous Author(s) 
+
+Affiliation Address 
+
+email 
+
+## Abstract 
+
+As large models are increasingly deployed across various tasks, the limited GPU 1
+
+memory available for storing and executing task-specific models presents a growing 2
+
+bottleneck. Model merging has emerged as a promising solution to accommodate 3
+
+multiple large models within constrained memory budgets. While traditional multi-4
+
+task learning methods attempt to merge shared layers, they require labor-intensive 5
+
+annotated labels and incur significant computational overhead. Recent merging 6
+
+techniques aim to address this issue by combining models at inference time; how-7
+
+ever, these approaches often rely on simplistic heuristics, ignore weight distribution 8
+
+characteristics, assume architectural identity, or require access to test samples to 9
+
+infer merging coefficients, thereby limiting their generalization capability and scala-10 
+
+bility. We present StatsMerging , a novel lightweight learning-based model merging 11 
+
+method guided by weight distribution statistics without requiring ground truth 12 
+
+labels or test samples. StatsMerging offers three key advantages: (1) It uniquely 13 
+
+leverages singular values from singular value decomposition (SVD) to capture 14 
+
+task-specific weight distributions, serving as a proxy for task importance to guide 15 
+
+task coefficient learning; (2) It employs a lightweight learner StatsMergeLearner 16 
+
+to model the weight distributions of task-specific pre-trained models, improv-17 
+
+ing generalization and enhancing adaptation to unseen samples; (3) It introduces 18 
+
+Task-Specific Teacher Distillation for merging vision models with heterogeneous 19 
+
+architectures, a merging training paradigm that avoids costly ground-truth labels 20 
+
+by task-specific teacher distillation. Notably, we present two types of knowledge 21 
+
+distillation, (a) distilling knowledge from task-specific models to train StatsMerge-22 
+
+Learner ; and (b) for the first time, distilling knowledge from models with different 23 
+
+architectures prior to merging, following a distill-then-merge paradigm. Extensive 24 
+
+experiments across eight tasks demonstrate the effectiveness of StatsMerging . Our 25 
+
+results show that StatsMerging outperforms state-of-the-art techniques in terms of 26 
+
+overall accuracy, generalization to unseen tasks, and robustness to image quality 27 
+
+variations. 28 
+
+## 1 Introduction 29 
+
+Computer vision has witnessed transformative progress fueled by deep learning, particularly through 30 
+
+the development and adoption of large-scale pre-trained models. Architectures like Convolutional 31 
+
+Neural Networks (CNNs) (Krizhevsky et al., 2012; He et al., 2016; Simonyan and Zisserman, 2014), 32 
+
+Vision Transformers (ViTs) (Dosovitskiy et al., 2021b; Touvron et al., 2021), and hybrid approaches 33 
+
+(Liu et al., 2022) pre-trained on massive datasets have become the cornerstone of modern vision 34 
+
+applications. Large-scale models leveraging multi-modal pre-training, such as CLIP (Radford et al., 35 
+
+2021)) or generative models like GANs (Goodfellow et al., 2014) and Diffusion Models (Ho et al., 36 
+
+2020; Rombach et al., 2022) have further pushed the boundaries of visual understanding and synthesis, 37 
+
+Submitted to 39th Conference on Neural Information Processing Systems (NeurIPS 2025). Do not distribute. enabling the use of pre-trained backbones to a wide range of downstream vision applications. The 38 
+
+dominant practice is to fine-tune these powerful base models to computer vision tasks, including 39 
+
+image classification (He et al., 2016), object detection (Ren et al., 2015; Carion et al., 2020a), semantic 40 
+
+segmentation (Long et al., 2015; Xie et al., 2021), image restoration (Zhang et al., 2017; Saharia et al., 41 
+
+2022), and image generation (Mirza and Osindero, 2014). This success, however, leads to a practical 42 
+
+challenge: the proliferation of numerous specialized pre-trained weights and model checkpoints 43 
+
+(Cao et al., 2024a, 2025), most of which share the same foundational ViT or CNN backbones. 44 
+
+Managing this growing collection incurs significant storage overhead, complicates deployment, and 45 
+
+represents a missed opportunity to consolidate the related, yet specialized, knowledge contained 46 
+
+within these models (Wortsman et al., 2022), particularly on compute-constrained platforms such as 47 
+
+edge devices (Cao et al., 2024b; Singh et al., 2024). While Multi-Task Learning (MTL) (Vandenhende 48 
+
+et al., 2022b) aims to create versatile single models for vision tasks, it often demands complex joint 49 
+
+training strategies, concurrent access to diverse datasets, and careful architecture design to balance 50 
+
+performance across disparate tasks. 51 
+
+Model merging offers a compelling post-hoc alternative, seeking to combine independently trained 52 
+
+models without expensive retraining. However, while techniques for model merging have gained 53 
+
+traction, particularly in Natural Language Processing (NLP) (Yadav et al., 2023a; Ilharco et al., 54 
+
+2023), adapting these techniques in computer vision domain has far less explored. A straightforward 55 
+
+approach of simple weight averaging (Wortsman et al., 2022) often fails in vision tasks due to the 56 
+
+complex, hierarchical visual feature representations, task-specific optimizations, and the presence of 57 
+
+intricate noise patterns that lead to sharp, non-convex loss minima (Izmailov et al., 2018). Recent 58 
+
+methods in this direction (Matena and Raffel, 2022; Jin et al., 2023; Yang et al.; Padmanabhan et al., 59 
+
+2023) neglect the importance of weight distribution. 60 
+
+This paper introduces a novel model merging framework specifically designed to address the afore-61 
+
+mentioned challenges within computer vision. We propose StatsMerging , a weight distribution 62 
+
+statistics-guided merging approach that moves beyond simple parameter averaging or task-vector 63 
+
+manipulation. StatsMerging leverages the statistical features models pre-trained on prior tasks for 64 
+
+merged. In particular, we compute salient statistics extracted by leverage Singular Value Decom-65 
+
+position (SVD) to capture the dominant properties of the learned feature spaces. This statistical 66 
+
+information, intrinsically capturing aspects of the pre-trained model distributions, guides the merging 67 
+
+process by learning a compact Multilayer Perceptron (MLP), coined StatsMergeLearner that predicts 68 
+
+adaptive merging coefficients ( λ) shown in Fig. 1. This allows the merging to be guided by the 69 
+
+weight landscape, rather than treating coefficients as free parameters requiring external tuning data. 70 θpre                        
+
+> Tk
+> θk
+> Tk=θk-θpre
+> a) Task Vectors θpre
+> TA
+> θMTL
+> θMTL =θpre +λ( TA+ T B)b) Task Arithmetic
+> TB
+> θpre
+> λATA
+> θMTL
+> θMTL =θpre +(λ ATA+λBTB)c) AdaMerging
+> λBTB
+> θpre
+> θMTL =θpre +(λ ATA+λBTB)d) StatsMerging (Ours)
+> SML
+> stats
+> λ= [λ A,λB] = SML(stats(θ pre ))
+> λATA
+> θMTL
+> λBTB
+
+Figure 1: Compared to prior works, StatsMerging uniquely learns the merging coefficients using 
+
+StatsMergeLearner , taking advantage of statistical features of weigts pre-trained on prior tasks. Notably, while both AdaMerging and StatsMerging are presented in the task-wise level in c) and d) for simplicity of illustration, the same principle can be applied at the layer-wise level for fine-grained adaptation. We make four significant contributions summarized as follows: 71 
+
+• We propose StatsMerging 1, a novel model merging framework guided by model weight 72 
+
+statistics, leveraging singular values extracted via Singular Value Decomposition (SVD) to 73 
+
+predict merging coefficients λ.74 
+
+> 1
+
+Our code is available at https://github.com/statsmerging/statsmerging. 
+
+2• We design the lightweight StatsMergeLearner to learn model merging coefficients λ estima-75 
+
+tion based on weight statistical features, through a newly proposed Task-Specific Teacher 76 
+
+Distillation training paradigm without manually-annotated labels. 77 
+
+• We introduce the first heterogeneous architectural merging method, which distills knowledge 78 
+
+from models with non-identical architectures into the unified target architecture. 79 
+
+• Extensive experiments demonstrate the effective of our proposed StatsMerging , achieving 80 
+
+84 .5% average accuracy on merging models from eight tasks, outperform the state-of-the-art 81 
+
+AdaMerging ( 81 .1% ) by a substantial margin of 3.4% .82 
+
+## 2 Related Work 83 
+
+2.1 Multi-Task Learning 84 
+
+Multi-Task Learning (MTL) (Zhang and Yang, 2021; Vandenhende et al., 2022a) represents a 85 
+
+paradigm for training a single model to perform multiple tasks concurrently. While MTL aims to 86 
+
+create unified models capable of handling diverse objectives, it typically requires careful design of 87 
+
+network architectures, computationally expensive training, access to large and diverse datasets, and 88 
+
+intricate task balancing strategies (Zhang and Yang, 2021). Furthermore, MTL necessitates joint 89 
+
+training from the outset, which can be computationally expensive and may not be feasible when 90 
+
+dealing with a collection of pre-trained, specialized models. Model merging offers a compelling 91 
+
+alternative by enabling the combination of independently trained models, without the need for 92 
+
+extensive retraining or simultaneous access to multi-task datasets. Our work distinguishes from MTL 93 
+
+by focusing on efficiently transferring existing knowledge within specialized models through weight 94 
+
+statistics-guided merging rather than joint training. 95 
+
+2.2 Multi-Task Merging 96 
+
+Early approaches to model merging often involved simple heuristics like Weight Averaging (Wortsman 97 
+
+et al., 2022), Ties-Merging (Yadav et al., 2023a), and Arithmetic Merging (Ilharco et al., 2023). 98 
+
+While straightforward to implement, these methods (Ye et al., 2023; Akiba et al., 2025; Tang et al., 99 
+
+2025) typically lack awareness of the weight distributions and learned representations within the 100 
+
+models, leading to suboptimal performance in the merged model compared to individually fine-tuned 101 
+
+models or unified models trained from scratch. For instance, Wortsman et al. (Wortsman et al., 2022) 102 
+
+demonstrated that naive weight averaging could significantly degrade performance, highlighting the 103 
+
+challenges in consolidating knowledge from independently trained networks. More recent methods, 104 
+
+such as those explored in natural language processing (Yadav et al., 2023b; Ilharco et al., 2023), 105 
+
+have shown promise by learning interpolation weights. However, these often treat the weights as 106 
+
+free parameters, potentially requiring significant tuning data and not explicitly leveraging the weight 107 
+
+distribution of the models being merged, a key distinction from our proposed approach. The gap often 108 
+
+lies in effectively unifying the diverse and task-specific feature representations learned by individual 109 
+
+models into a single, high-performing entity without extensive retraining. 110 
+
+2.3 Merging Methods in Computer Vision 111 
+
+The application of model merging techniques in computer vision is relatively less explored compared 112 
+
+to natural language processing (Yadav et al., 2023b; Ilharco et al., 2023). Computer vision models, 113 
+
+particularly deep convolutional neural networks (CNNs) (Krizhevsky et al., 2012; He et al., 2016; 114 
+
+Simonyan and Zisserman, 2014) and Vision Transformers (ViTs) (Dosovitskiy et al., 2021a; Touvron 115 
+
+et al., 2021), learn complex, hierarchical feature representations that are highly sensitive to task-116 
+
+specific optimizations (Izmailov et al., 2018). Simple averaging techniques often fail due to the 117 
+
+non-convex nature of the loss landscape and the divergence of learned feature spaces across different 118 
+
+visual tasks. Recent advancements (Matena and Raffel, 2022; Yang et al.) have shown potential, 119 
+
+but often lack explicit mechanisms to account for the unique properties inherent in visual data and 120 
+
+architectures, such as spatial relationships in CNNs or attention mechanisms in ViTs. Furthermore, 121 
+
+the effectiveness of these methods across the broad spectrum of computer vision tasks, including 122 
+
+low-level restoration (Zhang et al., 2017; Saharia et al., 2022), mid-level detection (Ren et al., 2015; 123 
+
+Carion et al., 2020b), and high-level classification (He et al., 2016), has not been comprehensively 124 
+
+validated. Our work addresses these limitations by introducing a novel merging framework that 125 
+
+3leverages internal model weight statistics to guide the merging process, making it more adaptable and 126 
+
+effective across diverse computer vision tasks and architectures. 127 
+
+Method No No Layer TT Heterogeneous Manual Label TT Samples Level Adaptability Architecture Traditional MTL ✗ ✗ * ✗ ✗
+
+Task Arithmetic ✓ ✓ ✗ ✗ ✗
+
+Ties-Merging ✓ ✓ ✗ ✓ ✗
+
+Fisher Merging ✓ ✓ ✗ ✗ ✗
+
+RegMean ✓ ✓ ✗ ✗ ✗
+
+AdaMerging ✓ ✗ ✓ ✓ ✗
+
+StatsMerging (Ours) ✓ ✓ ✓ ✓ ✓
+
+Table 1: Summary of system characteristics in recent works. *: Optional. TT: Test-Time. In summary, our method StatsMerging enjoys several advantages compared to prior works: (1) no 128 
+
+human annotated labels are required to construct the training set; (2) no validation samples are needed 129 
+
+to compute the weight coefficients for merging; (3) it works in the Layer-Wise level; (4) it allows for 130 
+
+test-time adaptability; (5) it can extend to heterogeneous architectures. 131 
+
+## 3 Methodology 132 
+
+3.1 Preliminaries 133 
+
+Notations: A deep neural network is parameterized by a set of weights θ = {θ1, θ 2, . . . , θ L} that 134 
+
+learns the mapping from an input data xi ∈ Rd to a predicted value ˆyi ∈ RD : fθ (xi) → ˆyi. Of these, 135 
+
+θl represents the l-th l ∈ { 1, 2, . . . , L } layer weights where L is the number of layers of the model 136 
+
+fθ , d denotes an input data xi’s dimension. For classification problems, yi is the class label and D is 137 
+
+the number of classes, while for regression problems, D is the dimension of the output vector yi.138 
+
+The weights of a pre-trained model (e.g., ViT or ResNet) are denoted as θpre = {θ1
+
+> pre
+
+, θ 2
+
+> pre
+
+, . . . , θ Lpre }.139 
+
+The weights fine-tuned on a specific training data {xi, y i}N tr k 
+
+> i=1
+
+for task k is recorded as θk =140 
+
+{θ1
+
+> k
+
+, θ 2
+
+> k
+
+, . . . , θ Lk } where N tr k is the number of training samples. 141 
+
+Problem Formulation: The problem of model merging is formulated as given K tasks’ training data, 142 
+
+find a way to combine weights {θk}Kk=1 fine-tuned for K tasks previously to obtain a new weight θm143 
+
+without undergoing the retraining process, while the new model fθm is capable of performing well 144 
+
+on K tasks jointly. 145 
+
+It is assumed that all K fine-tuned weights and the merged weight share the same neural network 146 
+
+architecture. Therefore, the core question is how to linearly combine {θk}Kk=1 to obtain θm. In the 147 
+
+task level, the model merging problem is finding a set of coefficients λk ∈ { λ1, λ 2, . . . , λ K } such that 148 
+
+the merged model weights θm = PKk=1 λkθk for model fθm perform well on all K tasks. In the layer 149 
+
+level, it becomes searching for a set of coefficients λlk ∈ { λ11, λ 21, . . . , λ L 
+
+> 1
+
+, λ 12, λ 22, . . . , λ L 
+
+> 2
+
+, . . . , λ LK }150 
+
+to obtain the merged model θm = PKk=1 
+
+PLl=1 λlkθlk that maintain high performance on K tasks. 151 
+
+3.2 Weight Statistics-Guided Model Merging 152 
+
+In this section, we describe the main intuition and techniques of our proposed method: StatsMerging .153 
+
+Our core idea is that given the distribution of pre-trained weights θk, we can learn a function 154 
+
+g(θk) → λm to predict the merging coefficients λm. We argue that weight distribution plays an 155 
+
+important role in model merging. However, directly using the raw weights θk as input is impractical 156 
+
+due to the high dimension of θk. We posit that such information can be represented by weight 157 
+
+statistics. These statistical features contain key information regarding the amount of weights θk for a 158 
+
+task k to be merged to the final model. We highlight the key differences with prior works in Fig. 1 d). 159 
+
+Weight Statistics: For a pre-trained weight θk on task k, we compute the mean μθk and variance 160 
+
+σ2 = V ar (θk) to represent its center and breadth, as well as its magnitude m = || θk|| . In addition, 161 
+
+4we extract the singular values σ′ 
+
+> i
+
+from Singular Value Decomposition (SVD): 162 
+
+Wk = UkΣkV ⊤ 
+
+> k
+
+(1) where Wθk represents the matrix of the model parameter θk. By default, we use rank 3 from Σk to 163 
+
+form weight statistics. We hypothesize that singular values compress the key information regarding 164 
+
+weight distribution that can benefit the decision of assigning the amount of weights from θk for 165 
+
+merging. Combining all together, the weight statistics feature vector Sk is formed as 166 
+
+Sk = stats (θk) = [ μ, σ 2, m, σ ′ 
+
+> r
+
+] (2) where stats () extracts the statistical features from the weight θk, σr represents the singular value 167 
+
+vector given rank r: σ′ 
+
+> r
+
+= [ σ′
+
+> 1
+
+, σ ′
+
+> 2
+
+, . . . , σ ′ 
+
+> r
+
+].168 
+
+Notably, the Equation 3 above is task-wise while we also introduce layer-wise formulation for layer l:169 
+
+Slk = stats (θlk) = [ μ, σ 2, m, σ ′ 
+
+> r
+
+]l (3) where the layer-wise statistics features of pre-trained model from task k layer l is computed. 170 
+
+StatsMergeLearner (SML): We adopt a multilayer perceptron (MLPs) to learn to predict the 171 
+
+merging coefficients λ given weight statistics feature vector Sk as input. In the task-wise mode, the 172 
+
+StatsMergeLearner is denoted as SM L (Sk):173 
+
+λk = SM L (Sk) = g(stats (θk)) (4) where λk is a scalar representing the merging coefficient of Task k model. In the layer-wise mode, 174 
+
+the StatsMergeLearner is denoted as M (Sk):175 
+
+λlk = SM L (Slk) = g(stats (θlk)) (5) where λk is a vector containing L layers’ coefficients and λlk refers to the coefficient of layer l in the 176 
+
+k pre-trained model. By default, we use a two-layer MLP to implement the StatsMergeLearner .177 
+
+Optimization Objective. To train StatsMergeLearner , in the standard supervised training paradigm, 178 
+
+we freeze the weights for each task θk and apply the cross-entropy loss function LCE on the 179 
+
+aggregated dataset: 180 
+
+LSL  
+
+> CE
+
+= −
+
+> Cm
+
+X
+
+> c=1
+
+yc log(ˆ yc)) (6) where ˆyc is the prediction from the merged model for class c, Cm is the total number of classes in the 181 
+
+aggregated dataset. 182 
+
+3.3 Task-Specific Teacher Distillation 183 
+
+We present a novel Task-Specific Teacher Distillation training paradigm to train the StatsMerge-184 
+
+Learner (SML) for model merging as illustrated in Fig. 2 and detailed in Algorithm 1. Our key 185 
+
+intuition is that each pre-trained model θk is already good at its own task dataset {xi, y i}k ∈ Dk,186 
+
+therefore we regard it ( θk) as the Task-Specific Teacher Tk. Subsequently, the predictions ˆyi,k from 187 
+
+the model trained on task k is decent enough as pseudo labels when it comes to its pre-trained 188 
+
+dataset sample {xi, y i}k. We aggregate such pairs {xi, ˆyi,k }k to construct the merged dataset to 189 
+
+train SM L () . We highlight the key benefit of this approach that enables dataset preparation without 190 
+
+relying on human-annotated labels. The predicted class label in one-hot encoded format. Therefore, 191 
+
+the cross-entropy loss is applied: 192 
+
+LCE = −
+
+> Cm
+
+X
+
+> c=1
+
+ˆyc,k log(ˆ yc)) (7) 5Task 1 
+
+> Merge
+> Task-Speci fi cTeachers
+
+... 
+
+> Class Pseudo Labels
+
+... 
+
+> Task-Speci fi cSamples
+> Task 1
+> Task 2
+> Task k
+
+...   
+
+> Stats
+> θpre1, θpre2, ..., θprek
+> λ1
+> λ2
+> λk
+
+SML   
+
+> θMTL
+> Class Predictions
+> Loss
+> λ1θpre1
+> λ2θpre2
+> λkθprek
+> Pseudo Label Generation Gradient Merge Inference Loss
+> Task-Speci fi cPre-Trained Models
+
+... 
+
+> Task 2
+> Task k
+
+... 
+
+> Merged Model Weight Statistics StatsMergeLearner (SML)
+
+Figure 2: Knowledge Distillation Diagram. StatsMergeLearner (SML) learns the merging coefficients 
+
+λ by minimizing the loss between the merged model’s predictions and pseudo labels generated by task-specific teacher models. During inference, only the merged model in StatsMerging is used to predict class labels. We present a novel Task-Specific Teacher Distillation training paradigm to train the StatsMergeLearner 
+
+(SML) for model merging as illustrated in Fig. 2 and detailed in Algorithm 1. Our key intuition is that each pre-trained model θk is already good at its own task dataset {xi, y i}k ∈ Dk, therefore we regard it ( θk)as the Task-Specific Teacher Tk. Subsequently, the predictions ˆyi,k from the model trained on task k is decent enough as pseudo labels when it comes to its pre-trained dataset sample {xi, y i}k. We aggregate such pairs {xi, ˆyi,k }k to construct the merged dataset to train SM L () . We highlight the key benefit of this approach that enables dataset preparation without relying on human-annotated labels. The predicted class label in one-hot encoded format. Therefore, the cross-entropy loss is applied while such loss function simplicity helps extend to other vision tasks and architectures. 
+
+Algorithm 1. Unified Statistics-Guided Model Merging via Task-Specific Teacher Model Distillation 
+
+1: Input: Set of pre-trained models {M1, M 2, . . . , M k }
+
+with weights {θ1, θ 2, . . . , θ k } for K tasks. 
+
+2: Output: Merged model Mmerged with weights θmerged 
+
+3: // Prepare K pre-trained models 
+
+4: if Same architecture A for all Mi then 
+
+5: Set Mtarget to the shared architecture 
+
+6: else 
+
+7: Select a target architecture Mtarget 
+
+8: for i = 1 to k do 
+
+9: if A(Mi)̸ = A(Mtarget ) then 
+
+10: Distill Mi into Mtarget to obtain updated θi
+
+11: end if 
+
+12: end for 
+
+13: end if 
+
+14: // Merge K models 
+
+15: for k = 1 to K do 
+
+16: // mean μ, std σ2, norm m, singular value σ′
+
+> r
+
+17: Extract statistics Sk = [ μ, σ 2, m, σ ′ 
+
+> r
+
+] from θk
+
+18: Predict coefficients λk = SML (Sk )
+
+19: Merge layer weights: θl 
+
+> merged
+
+= Pki=1 λk θk
+
+20: end for 
+
+21: return Mmerged with weights θmerged 
+
+> 193
+
+## 4 Experiments 194 
+
+4.1 Experimental Setup 195 
+
+In this section, we present the experimental setup and evaluation results used to compare our method 196 
+
+against recent baselines. 197 
+
+Datasets and Models : Our experiments include eight image classification tasks with datasets 198 
+
+SUN397 (Xiao et al., 2016), Stanford Cars (Krause et al., 2013), RESISC45 (Cheng et al., 2017), 199 
+
+EuroSAT (Helber et al., 2019), SVHN (Netzer et al., 2011), GTSRB (Stallkamp et al., 2011), MNIST 200 
+
+(LeCun et al., 1998), DTD (Cimpoi et al., 2014), and CIFAR10 (Krizhevsky and Hinton, 2009) 2 We 201 
+
+use ViT-B/32 CLIP (Radford et al., 2021) as the pre-trained backbone. Individual task-specific models 202 
+
+are obtained by training on each dataset separately. For merging models with different architectures, 203 
+
+we first distill them into a single backbone before applying our merging method. 204 
+
+> 2
+
+In the remainder of the paper, the abbreviations shown in brackets are used to denote each task dataset: SUN397 (SU), Cars (CA), RESISC45 (RE), EuroSAT (EU), SVHN (SV), GTSRB (GT), MNIST (MN) and DTD (DT). 
+
+6Baselines and Metrics : We compare against standard baselines including Individual Training, 205 
+
+Traditional Multi-Task Learning (MTL) (Zhang and Yang, 2021), Weight Averaging (Wortsman et al., 206 
+
+2022), Task Arithmetic (Ilharco et al., 2023), Fisher Merging (Matena and Raffel, 2022), RegMean 207 
+
+(Jin et al., 2023), Ties-Merging (Yadav et al., 2023a) and AdaMerging (Yang et al.). The primary 208 
+
+evaluation metric is the average accuracy (Avg Acc) on the test sets of all tasks. The evaluation is 209 
+
+conducted on eight different vision classification tasks. 210 
+
+StatsMergeLearner Training Detail : Our MLP-based StatsMergeLearner learns to predict layer-211 
+
+wise or task-wise merging weights coefficients ( λ) based on weight statistics from individual task 212 
+
+models. The StatsMergeLearner is trained for 500 epochs using Adam, with a learning rate of 1e − 3213 
+
+and a StepLR scheduler (factor 0.1 every 100 epochs), which translates to around only 3 hours to 214 
+
+merge 4 ViTs, offering the practicality and advantage of applying our technique for practitioners 215 
+
+without spending days or weeks for training (Zhang and Yang, 2021; Padmanabhan et al., 2023). 216 
+
+We train the StatsMergeLearner primarily using knowledge distillation from the aggregated dataset 217 
+
+without human annotated labels described in Sec. 3.3, optimized with either Cross-Entropy (Mao 218 
+
+et al., 2023) or KL Divergence (Kullback and Leibler, 1951) loss. 219 
+
+4.2 Merging Performance 220 
+
+In this section, we present a comprehensive evaluation of our approach in comparison to state-of-221 
+
+the-art task vector merging methods, assessing its superiority across several fundamental aspects: 222 
+
+Multi-task merging performance, generalization to unseen tasks and heterogeneous architectures. 223 
+
+Substantially Higher Merging Performance. The main results of merging performance of ViT-224 
+
+B/32 models on eight tasks are presented in this section, detailed 3 in Table 2. We present two 225 
+
+levels of granularity: Task-Wise (TW) and Layer-Wise (LW). Our method StatsMerging achieved 226 
+
+an average accuracy (Avg Acc) of 76 .5% and 84 .5% in both TW and LW levels, outperforming the 227 
+
+state-of-the-art (SOTA) method AdaMerging++ by a large margin of 3.3% and 3.4% . We attribute the 228 
+
+improvements to the ability of StatsMergeLearner to adapt task-specific weights based on their weight 229 
+
+statistics to the merged model. The use of pseudo labels from task-specific teachers {T1, T 2, . . . , T k}230 
+
+provides stronger signals for StatsMergeLearner to better assign weight coefficients λ than the 231 
+
+entropy minimization approach in the AdaMerging++. 232 
+
+Table 2: Multi-task merging performance (Avg Acc %) when merging ViT-B/32 models on eight tasks. Results of our method StatsMerging are shaded in gray. Bold and underscore indicate the highest and second-highest scores within the merging group below the double rules in each column, respectively. TW: Task-wise. LW: Layer-wise. 
+
+Method SU CA RE EU SV GT MN DT Avg Acc 
+
+Pre-Trained 62.3 59.7 60.7 45.5 31.4 32.6 48.5 43.8 48.0 Individual 75.3 77.7 96.1 99.7 97.5 98.7 99.7 79.4 90.5 Traditional MTL 73.9 74.4 93.9 98.2 95.8 98.9 99.5 77.9 88.9 Weight Averaging 65.3 63.4 71.4 71.7 64.2 52.8 87.5 50.1 65.8 Task Arithmetic 55.2 54.9 66.7 78.9 80.2 69.7 97.3 50.4 69.1 Fisher Merging 68.6 69.2 70.7 66.4 72.9 51.1 87.9 59.9 68.3 RegMean 65.3 63.5 75.6 78.6 78.1 67.4 93.7 52.0 71.8 Ties-Merging 59.8 58.6 70.7 79.7 86.2 72.1 98.3 54.2 72.4 TW AdaMerging 58.0 53.2 68.8 85.7 81.1 84.4 92.4 44.8 71.1 TW AdaMerging++ 60.8 56.9 73.1 83.4 87.3 82.4 95.7 50.1 73.7 
+
+TW StatsMerging 61.3 70.0 74.2 85.2 87.5 82.5 96.2 54.2 76.4 (+3.3) LW AdaMerging 64.5 68.1 79.2 93.8 87.0 91.9 97.5 59.1 80.1 LW AdaMerging++ 66.6 68.3 82.2 94.2 89.6 89.0 98.3 60.6 81.1 
+
+LW StatsMerging 67.4 74.1 82.9 91.1 89.8 94.7 98.3 77.5 84.5 (+3.4) 
+
+The LW StatsMerging achieved significantly higher (+8 .1%) Avg Acc than TW StatsMerging with 233 
+
+84 .5% and 76 .4% , respectively. This improvement in layer-wise merging over task-wise aligns with 234 
+
+observations in AdaMerging. We hypothesize that compared to the coarser task-level granularity, the 235 
+
+> 3
+
+Please refer to the Appendix for experimental details, including the full list of tasks, datasets, and baselines. 
+
+7finer-grained layer-level offers greater flexibility of coefficients across various semantics regarding 236 
+
+task-agnostic and task-specific features, which are often learned in various levels of a neural network. 237 
+
+Significantly Enhanced Generalization. A merged model is expected to generalize to unseen tasks 238 
+
+by strategically transferring the knowledge from the combined set of old tasks. We benchmark such 239 
+
+generalization ability of StatsMerging against four strong baselines: Task Arithmetic, Ties-Merging, 240 
+
+AdaMerging, and AdaMerging++. We follow the same evaluation protocol in AdaMerging training 241 
+
+on two groups of tasks, each group consisting of six seen tasks, and testing on two unseen tasks. 242 
+
+Table 3: Generalization results (Avg Acc %) on two unseen tasks when merging Layer-Wise ViT-B/32 models on six tasks. StatsMerging : shaded in gray. Bold: top score. Underscore: 2nd-highest score. 
+
+Seen Tasks Unseen Tasks Method SU CA RE DT SV GT Avg Acc MN EU Avg Acc 
+
+Task Arithmetic 63.3 62.4 75.1 57.8 84.6 80.4 70.6 77.2 46.2 61.7 Ties-Merging 67.8 66.2 77.2 56.7 77.1 70.9 69.3 75.9 43.3 59.6 AdaMerging 65.2 65.9 88.5 61.1 92.2 91.5 77.4 84.0 56.1 70.0 AdaMerging++ 68.2 67.6 86.3 63.6 92.6 89.8 78.0 83.9 53.5 68.7 
+
+StatsMerging 69.1 71.3 86.7 75.2 93.2 95.7 81.9 (+3.9) 85.1 56.4 70.8 (+0.8) Method SU CA GT EU DT MN Avg Acc RE SV Avg Acc 
+
+Task Arithmetic 64.0 64.0 75.2 87.7 57.0 95.7 73.9 52.3 44.9 51.1 Ties-Merging 68.0 67.1 67.7 78.4 56.5 92.8 71.8 58.7 49.2 53.9 AdaMerging 67.1 67.8 94.8 94.4 59.6 98.2 80.3 50.2 60.9 55.5 AdaMerging++ 68.9 69.6 91.6 94.3 61.9 98.7 80.8 52.0 64.9 58.5 
+
+StatsMerging 69.6 73.3 96.1 95.4 74.1 97.2 84.3 (+3.5) 54.2 67.1 60.7 (+2.2) 
+
+Details are presented in Table 3, where in both groups our proposed StatsMerging achieved 70 .8% s243 
+
+and 60 .7% , significantly outperforming the second best method AdaMerging by +0 .8% and +2 .2% 244 
+
+margins. Such improvements are attributed to both (1) the careful feature design of weight statistics 245 
+
+that captures the dominant information regarding weight distributions from pre-trained models, 246 
+
+which potentially helps reduce noise from each task dataset; and (2) the joint training from all old 247 
+
+tasks on the task-specific teacher-distilled labels, enabling the implicit learning of task-agnostic and 248 
+
+task-specific features that can benefit the generalization ability. 249 
+
+Extension to Heterogeneous Architectures. Our StatsMerging offers the first and unique advantage 250 
+
+without the assumption of architectural identity in prior works (Wortsman et al., 2022; Ilharco et al., 251 
+
+2023; Yadav et al., 2023a; Matena and Raffel, 2022; Jin et al., 2023). To verify the performance of 252 
+
+varying architectures, we conduct experiments on ResNet50 (RN) and ViT-B/32 (VT) to represent 253 
+
+Convolutional Neural Network (CNN) and Vision Transformer (ViT) architectures. 254 
+
+In particular, we distill fine-tuned VT teachers into a RN (Khanuja et al., 2021) student on three diverse tasks of CIFAR-10 (CI), EuroSAT (EU) and Stanford Cars (CA) with the distillation loss: 
+
+L = α LCE (y, ˆy) + (1 − α) T 2 LKL 
+
+ σ( zT ), σ ( zt 
+
+> T
+
+),
+
+(8) where LKL denotes KL-Divergence, z is logit, T = 4 .0
+
+represents temperature, α = 0 .7 is the weight balance of two sub-losses. CI is used due to the available pre-trained RN weights. Remarkably, the distilled RN matches its VT teacher’s accuracy, achieving 76 .4% (VT: 77 .7% ) for CA and 94 .5% for EU (VT: 99 .7% ) despite the architectural difference shown in Table 3. We then apply our 
+
+StatsMerging to combine the CI–trained RN and its distilled variants. We merge multiple task models into a single RN using the merging coefficients inferred by 
+
+StatsMergeLearner , yielding a 7.6% average improvement over the vanilla Task-Arithmetic of 73 .7% and achieving 
+
+81 .3% average accuracy.                                       
+
+> Table 3. Multi-task merging performance (Avg Acc %) of models in heterogeneous architectures: ResNet50 (RN) & ViT-B/32 (VT). StatsMerging : shaded in gray.
+> Method CI CA EU Avg Acc
+> Backbone RN VI VI -Distilled -RN RN -Individual 97.8 77.7 99.7 91.7 Distilled -76.4 94.5 -Weight Averaging 77.1 56.4 64.9 59.4 Ties-Merging 76.5 52.8 80.1 69.8 Task Arithmetic 81.4 61.6 78.2 73.7
+> LW StatsMerging 87.2 68.4 88.4 81.3
+> 255
+
+84.3 StatsMerging Analysis 256 
+
+Label & Loss Function Study. 
+
+We conduct a loss function study on ViT-B/32 (4) models merged from four tasks, as shown in Table 4. Observe that StatsMerging trained on pseudo labels via Task-Specific Teacher Distillation (KD) achieves similar performance to StatsMerging trained on ground-truth labels (GT), with 88 .5% and 81 .2% average accuracy in TW and 90 .4% and 83 .5% in LW levels.                                   
+
+> Table 4. Multi-task performance (Avg Acc %) of StatsMerging when merging ViT-B/32 (4) models across four tasks. StatsMerging shaded in gray. GT: Ground Truth. KD: Knowledge Distillation. TW: Task-wise. LW: Layer-wise. Loss Level CA EU RE GT Avg Acc
+> GT TW 73.2 94.2 91.1 95.6 88.5 KD TW 64.2 88.6 85.2 86.7 81.2 GT LW 75.6 96.3 92.1 97.6 90.4 KD LW 68.7 91.6 87.2 93.5 83.5
+> 257
+
+Statistical Feature Ablation Study. 
+
+We conduct an ablation study on the statistical features. Results in Table 5 show that combining all statistical features improves merging performance, validating our design choice. Notably, the singular values σ′
+
+improve the multi-task performance in both same and different architecture settings by 
+
++3 .0 and +3 .2 increase of average accuracy, justifying our design choice of using SVD.                                      
+
+> Table 5: Multi-task performance (Avg Acc %) of StatsMerging when ablating statistical features of ViT-B/32 (4) models on four tasks: CA, EU, RE & GT. Bold: top score. StatsMerging : shaded in gray.
+> Same Architecture Different Architecture
+> μθkσ2mσ′Avg Acc μθkσ2mσ′Avg Acc
+> ✓83.4 ✓76.2
+> ✓✓84.1 (+0.7) ✓✓77.5 (+1.3)
+> ✓✓✓87.2 (+3.1) ✓✓✓78.1 (+0.6)
+> ✓✓✓✓90.2 (+3.0) ✓✓✓✓81.3 (+3.2)
+> 258
+
+Coefficient Analysis. We visualize the heatmap of ViT-B/32 (4) across eight tasks in Fig. 3. We 259 
+
+make several key observations: (1) the common recurring pattern of coefficients λ across all eight 260 
+
+tasks from earlier (left) to deeper (right) layers aligns with the repeated self-attention blocks in 261 
+
+the ViT architecture, e.g. Multi-Head Self-Attention (MHSA), MLP (Feed-Forward Network), and 262 
+
+LayerNorm, etc, demonstrating the need of various coefficients for various types of layers; (2) The 263 
+
+sparse non-uniform coefficient distributions (various colors like Layer 13 , 19 or 25 ) suggests that 264 
+
+merging layers can be more efficient at some specific layers instead of using one coefficient for an 265 
+
+entire pre-trained model, justifying the our granularity choice of Layer-Wise over Task-Wise level; 266 
+
+(3) some task-specific coefficient distributions verify the necessity of assigning distinct merging 267 
+
+coefficients across tasks in various layers, such as in Layer 5 vs. 147. Such distributions reflect the 268 
+
+various visual representations for different semantics learned across both layers and tasks. More 269 
+
+visualizations are provided in the Appendix for in-depth analysis. 270 0 6 12 18 24 30 36 42 48 54 60 66 72 78 84 90 96 102 108 114 120 126 132 138 144 150 156  
+
+> Cars
+> RESISC45
+> SUN397
+> EuroSAT
+> SVHN
+> GTSRB
+> MNIST
+> DTD 0.000
+> 0.025
+> 0.050
+> 0.075
+> 0.100
+> 0.125
+
+Figure 3: Heatmap of StatsMerging merging coefficients λ of ViT-B/32 (4) across eight tasks. X-axis: layer index. Y-axis: Tasks. Coefficients are normalized to sum to 1. 
+
+## 5 Conclusion 271 
+
+Model merging offers a compelling post-hoc advantage to reduce memory storage from a corpus of 272 
+
+large pre-trained models. We propose StatsMerging , a novel merging technique without relying on 273 
+
+simple heuristics, test-time samples or human annotated. The key intuition lies in the guidance of 274 
+
+weight statistics using a lightweight MLP learner, dubbed StatsMergeLearner , to learn merging coeffi-275 
+
+cient prediction. Exhaustive experiments demonstrate the effectiveness of our proposed StatsMerging 276 
+
+in model mering from eight diverse tasks, achieving 84 .5% average accuracy and surpassing the 277 
+
+SOTA AdaMerging ( 81 .1% ) by a large margin of 3.4% .278 
+
+9NeurIPS Paper Checklist 279 
+
+The checklist is designed to encourage best practices for responsible machine learning research, 280 
+
+addressing issues of reproducibility, transparency, research ethics, and societal impact. Do not remove 281 
+
+the checklist: The papers not including the checklist will be desk rejected. The checklist should 282 
+
+follow the references and follow the (optional) supplemental material. The checklist does NOT count 283 
+
+towards the page limit. 284 
+
+Please read the checklist guidelines carefully for information on how to answer these questions. For 285 
+
+each question in the checklist: 286 
+
+• You should answer [Yes] , [No] , or [NA] . 287 
+
+• [NA] means either that the question is Not Applicable for that particular paper or the 288 
+
+relevant information is Not Available. 289 
+
+• Please provide a short (1–2 sentence) justification right after your answer (even for NA). 290 
+
+The checklist answers are an integral part of your paper submission. They are visible to the 291 
+
+reviewers, area chairs, senior area chairs, and ethics reviewers. You will be asked to also include it 292 
+
+(after eventual revisions) with the final version of your paper, and its final version will be published 293 
+
+with the paper. 294 
+
+The reviewers of your paper will be asked to use the checklist as one of the factors in their evaluation. 295 
+
+While "[Yes] " is generally preferable to "[No] ", it is perfectly acceptable to answer "[No] " provided a 296 
+
+proper justification is given (e.g., "error bars are not reported because it would be too computationally 297 
+
+expensive" or "we were unable to find the license for the dataset we used"). In general, answering 298 
+
+"[No] " or "[NA] " is not grounds for rejection. While the questions are phrased in a binary way, we 299 
+
+acknowledge that the true answer is often more nuanced, so please just use your best judgment and 300 
+
+write a justification to elaborate. All supporting evidence can appear either in the main paper or the 301 
+
+supplemental material, provided in appendix. If you answer [Yes] to a question, in the justification 302 
+
+please point to the section(s) where related material for the question can be found. 303 
+
+IMPORTANT, please: 304 
+
+• Delete this instruction block, but keep the section heading “NeurIPS Paper Checklist" ,305 
+
+• Keep the checklist subsection headings, questions/answers and guidelines below. 306 
+
+• Do not modify the questions and only use the provided macros for your answers .307 
+
+1. Claims 308 
+
+Question: Do the main claims made in the abstract and introduction accurately reflect the 309 
+
+paper’s contributions and scope? 310 
+
+Answer: [Yes] 311 
+
+Justification: Our abstract does reflect our contributions to large extent, we did thorough 312 
+
+analysis and added more appropriate results in appendix as well which supports our claims. 313 
+
+Guidelines: 314 
+
+• The answer NA means that the abstract and introduction do not include the claims 315 
+
+made in the paper. 316 
+
+• The abstract and/or introduction should clearly state the claims made, including the 317 
+
+contributions made in the paper and important assumptions and limitations. A No or 318 
+
+NA answer to this question will not be perceived well by the reviewers. 319 
+
+• The claims made should match theoretical and experimental results, and reflect how 320 
+
+much the results can be expected to generalize to other settings. 321 
+
+• It is fine to include aspirational goals as motivation as long as it is clear that these goals 322 
+
+are not attained by the paper. 323 
+
+2. Limitations 324 
+
+Question: Does the paper discuss the limitations of the work performed by the authors? 325 
+
+Answer: [Yes] 326 
+
+10 Justification: We did mention limitations in the appendix. 327 
+
+Guidelines: 328 
+
+• The answer NA means that the paper has no limitation while the answer No means that 329 
+
+the paper has limitations, but those are not discussed in the paper. 330 
+
+• The authors are encouraged to create a separate "Limitations" section in their paper. 331 
+
+• The paper should point out any strong assumptions and how robust the results are to 332 
+
+violations of these assumptions (e.g., independence assumptions, noiseless settings, 333 
+
+model well-specification, asymptotic approximations only holding locally). The authors 334 
+
+should reflect on how these assumptions might be violated in practice and what the 335 
+
+implications would be. 336 
+
+• The authors should reflect on the scope of the claims made, e.g., if the approach was 337 
+
+only tested on a few datasets or with a few runs. In general, empirical results often 338 
+
+depend on implicit assumptions, which should be articulated. 339 
+
+• The authors should reflect on the factors that influence the performance of the approach. 340 
+
+For example, a facial recognition algorithm may perform poorly when image resolution 341 
+
+is low or images are taken in low lighting. Or a speech-to-text system might not be 342 
+
+used reliably to provide closed captions for online lectures because it fails to handle 343 
+
+technical jargon. 344 
+
+• The authors should discuss the computational efficiency of the proposed algorithms 345 
+
+and how they scale with dataset size. 346 
+
+• If applicable, the authors should discuss possible limitations of their approach to 347 
+
+address problems of privacy and fairness. 348 
+
+• While the authors might fear that complete honesty about limitations might be used by 349 
+
+reviewers as grounds for rejection, a worse outcome might be that reviewers discover 350 
+
+limitations that aren’t acknowledged in the paper. The authors should use their best 351 
+
+judgment and recognize that individual actions in favor of transparency play an impor-352 
+
+tant role in developing norms that preserve the integrity of the community. Reviewers 353 
+
+will be specifically instructed to not penalize honesty concerning limitations. 354 
+
+3. Theory assumptions and proofs 355 
+
+Question: For each theoretical result, does the paper provide the full set of assumptions and 356 
+
+a complete (and correct) proof? 357 
+
+Answer: [Yes] 358 
+
+Justification: Yes, we did provide experiments that support our proof and assumptions, more 359 
+
+experiments are added in the appendix. 360 
+
+Guidelines: 361 
+
+• The answer NA means that the paper does not include theoretical results. 362 
+
+• All the theorems, formulas, and proofs in the paper should be numbered and cross-363 
+
+referenced. 364 
+
+• All assumptions should be clearly stated or referenced in the statement of any theorems. 365 
+
+• The proofs can either appear in the main paper or the supplemental material, but if 366 
+
+they appear in the supplemental material, the authors are encouraged to provide a short 367 
+
+proof sketch to provide intuition. 368 
+
+• Inversely, any informal proof provided in the core of the paper should be complemented 369 
+
+by formal proofs provided in appendix or supplemental material. 370 
+
+• Theorems and Lemmas that the proof relies upon should be properly referenced. 371 
+
+4. Experimental result reproducibility 372 
+
+Question: Does the paper fully disclose all the information needed to reproduce the main ex-373 
+
+perimental results of the paper to the extent that it affects the main claims and/or conclusions 374 
+
+of the paper (regardless of whether the code and data are provided or not)? 375 
+
+Answer: [Yes] 376 
+
+Justification: Yes, we provided our code and model in github, that gives proof to reproduce 377 
+
+results. 378 
+
+Guidelines: 379 
+
+11 • The answer NA means that the paper does not include experiments. 380 
+
+• If the paper includes experiments, a No answer to this question will not be perceived 381 
+
+well by the reviewers: Making the paper reproducible is important, regardless of 382 
+
+whether the code and data are provided or not. 383 
+
+• If the contribution is a dataset and/or model, the authors should describe the steps taken 384 
+
+to make their results reproducible or verifiable. 385 
+
+• Depending on the contribution, reproducibility can be accomplished in various ways. 386 
+
+For example, if the contribution is a novel architecture, describing the architecture fully 387 
+
+might suffice, or if the contribution is a specific model and empirical evaluation, it may 388 
+
+be necessary to either make it possible for others to replicate the model with the same 389 
+
+dataset, or provide access to the model. In general. releasing code and data is often 390 
+
+one good way to accomplish this, but reproducibility can also be provided via detailed 391 
+
+instructions for how to replicate the results, access to a hosted model (e.g., in the case 392 
+
+of a large language model), releasing of a model checkpoint, or other means that are 393 
+
+appropriate to the research performed. 394 
+
+• While NeurIPS does not require releasing code, the conference does require all submis-395 
+
+sions to provide some reasonable avenue for reproducibility, which may depend on the 396 
+
+nature of the contribution. For example 397 
+
+(a) If the contribution is primarily a new algorithm, the paper should make it clear how 398 
+
+to reproduce that algorithm. 399 
+
+(b) If the contribution is primarily a new model architecture, the paper should describe 400 
+
+the architecture clearly and fully. 401 
+
+(c) If the contribution is a new model (e.g., a large language model), then there should 402 
+
+either be a way to access this model for reproducing the results or a way to reproduce 403 
+
+the model (e.g., with an open-source dataset or instructions for how to construct 404 
+
+the dataset). 405 
+
+(d) We recognize that reproducibility may be tricky in some cases, in which case 406 
+
+authors are welcome to describe the particular way they provide for reproducibility. 407 
+
+In the case of closed-source models, it may be that access to the model is limited in 408 
+
+some way (e.g., to registered users), but it should be possible for other researchers 409 
+
+to have some path to reproducing or verifying the results. 410 
+
+5. Open access to data and code 411 
+
+Question: Does the paper provide open access to the data and code, with sufficient instruc-412 
+
+tions to faithfully reproduce the main experimental results, as described in supplemental 413 
+
+material? 414 
+
+Answer: [Yes] 415 
+
+Justification: We provided access to code with proper readme. 416 
+
+Guidelines: 417 
+
+• The answer NA means that paper does not include experiments requiring code. 418 
+
+• Please see the NeurIPS code and data submission guidelines ( https://nips.cc/ 419 
+
+public/guides/CodeSubmissionPolicy ) for more details. 420 
+
+• While we encourage the release of code and data, we understand that this might not be 421 
+
+possible, so “No” is an acceptable answer. Papers cannot be rejected simply for not 422 
+
+including code, unless this is central to the contribution (e.g., for a new open-source 423 
+
+benchmark). 424 
+
+• The instructions should contain the exact command and environment needed to run to 425 
+
+reproduce the results. See the NeurIPS code and data submission guidelines ( https: 426 
+
+//nips.cc/public/guides/CodeSubmissionPolicy ) for more details. 427 
+
+• The authors should provide instructions on data access and preparation, including how 428 
+
+to access the raw data, preprocessed data, intermediate data, and generated data, etc. 429 
+
+• The authors should provide scripts to reproduce all experimental results for the new 430 
+
+proposed method and baselines. If only a subset of experiments are reproducible, they 431 
+
+should state which ones are omitted from the script and why. 432 
+
+• At submission time, to preserve anonymity, the authors should release anonymized 433 
+
+versions (if applicable). 434 
+
+12 • Providing as much information as possible in supplemental material (appended to the 435 
+
+paper) is recommended, but including URLs to data and code is permitted. 436 
+
+6. Experimental setting/details 437 
+
+Question: Does the paper specify all the training and test details (e.g., data splits, hyper-438 
+
+parameters, how they were chosen, type of optimizer, etc.) necessary to understand the 439 
+
+results? 440 
+
+Answer: [Yes] 441 
+
+Justification: We provided details in appendix. 442 
+
+Guidelines: 443 
+
+• The answer NA means that the paper does not include experiments. 444 
+
+• The experimental setting should be presented in the core of the paper to a level of detail 445 
+
+that is necessary to appreciate the results and make sense of them. 446 
+
+• The full details can be provided either with the code, in appendix, or as supplemental 447 
+
+material. 448 
+
+7. Experiment statistical significance 449 
+
+Question: Does the paper report error bars suitably and correctly defined, or other appropriate 450 
+
+information about the statistical significance of the experiments? 451 
+
+Answer: [Yes] 452 
+
+Justification: Our experiements are easy to follow, reproducable. 453 
+
+Guidelines: 454 
+
+• The answer NA means that the paper does not include experiments. 455 
+
+• The authors should answer "Yes" if the results are accompanied by error bars, confi-456 
+
+dence intervals, or statistical significance tests, at least for the experiments that support 457 
+
+the main claims of the paper. 458 
+
+• The factors of variability that the error bars are capturing should be clearly stated (for 459 
+
+example, train/test split, initialization, random drawing of some parameter, or overall 460 
+
+run with given experimental conditions). 461 
+
+• The method for calculating the error bars should be explained (closed form formula, 462 
+
+call to a library function, bootstrap, etc.) 463 
+
+• The assumptions made should be given (e.g., Normally distributed errors). 464 
+
+• It should be clear whether the error bar is the standard deviation or the standard error 465 
+
+of the mean. 466 
+
+• It is OK to report 1-sigma error bars, but one should state it. The authors should 467 
+
+preferably report a 2-sigma error bar than state that they have a 96% CI, if the hypothesis 468 
+
+of Normality of errors is not verified. 469 
+
+• For asymmetric distributions, the authors should be careful not to show in tables or 470 
+
+figures symmetric error bars that would yield results that are out of range (e.g. negative 471 
+
+error rates). 472 
+
+• If error bars are reported in tables or plots, The authors should explain in the text how 473 
+
+they were calculated and reference the corresponding figures or tables in the text. 474 
+
+8. Experiments compute resources 475 
+
+Question: For each experiment, does the paper provide sufficient information on the com-476 
+
+puter resources (type of compute workers, memory, time of execution) needed to reproduce 477 
+
+the experiments? 478 
+
+Answer: [NA] 479 
+
+Justification: Our experiments can be done on any GPU that has memory up to 40 GB. We 480 
+
+used NVIDIA RTX A6000. 481 
+
+Guidelines: 482 
+
+• The answer NA means that the paper does not include experiments. 483 
+
+• The paper should indicate the type of compute workers CPU or GPU, internal cluster, 484 
+
+or cloud provider, including relevant memory and storage. 485 
+
+13 • The paper should provide the amount of compute required for each of the individual 486 
+
+experimental runs as well as estimate the total compute. 487 
+
+• The paper should disclose whether the full research project required more compute 488 
+
+than the experiments reported in the paper (e.g., preliminary or failed experiments that 489 
+
+didn’t make it into the paper). 490 
+
+9. Code of ethics 491 
+
+Question: Does the research conducted in the paper conform, in every respect, with the 492 
+
+NeurIPS Code of Ethics. https://neurips.cc/public/EthicsGuidelines ?493 
+
+Answer: [Yes] 494 
+
+Justification: Yes, It does follow Neurips Code of Ethics. 495 
+
+Guidelines: 496 
+
+• The answer NA means that the authors have not reviewed the NeurIPS Code of Ethics. 497 
+
+• If the authors answer No, they should explain the special circumstances that require a 498 
+
+deviation from the Code of Ethics. 499 
+
+• The authors should make sure to preserve anonymity (e.g., if there is a special consid-500 
+
+eration due to laws or regulations in their jurisdiction). 501 
+
+10. Broader impacts 502 
+
+Question: Does the paper discuss both potential positive societal impacts and negative 503 
+
+societal impacts of the work performed? 504 
+
+Answer: [NA] 505 
+
+Justification: Our method solely addresses the new emerging solution for merging multi-506 
+
+models post training, so it doesn’t comes under societal impacts. 507 
+
+Guidelines: 508 
+
+• The answer NA means that there is no societal impact of the work performed. 509 
+
+• If the authors answer NA or No, they should explain why their work has no societal 510 
+
+impact or why the paper does not address societal impact. 511 
+
+• Examples of negative societal impacts include potential malicious or unintended uses 512 
+
+(e.g., disinformation, generating fake profiles, surveillance), fairness considerations 513 
+
+(e.g., deployment of technologies that could make decisions that unfairly impact specific 514 
+
+groups), privacy considerations, and security considerations. 515 
+
+• The conference expects that many papers will be foundational research and not tied 516 
+
+to particular applications, let alone deployments. However, if there is a direct path to 517 
+
+any negative applications, the authors should point it out. For example, it is legitimate 518 
+
+to point out that an improvement in the quality of generative models could be used to 519 
+
+generate deepfakes for disinformation. On the other hand, it is not needed to point out 520 
+
+that a generic algorithm for optimizing neural networks could enable people to train 521 
+
+models that generate Deepfakes faster. 522 
+
+• The authors should consider possible harms that could arise when the technology is 523 
+
+being used as intended and functioning correctly, harms that could arise when the 524 
+
+technology is being used as intended but gives incorrect results, and harms following 525 
+
+from (intentional or unintentional) misuse of the technology. 526 
+
+• If there are negative societal impacts, the authors could also discuss possible mitigation 527 
+
+strategies (e.g., gated release of models, providing defenses in addition to attacks, 528 
+
+mechanisms for monitoring misuse, mechanisms to monitor how a system learns from 529 
+
+feedback over time, improving the efficiency and accessibility of ML). 530 
+
+11. Safeguards 531 
+
+Question: Does the paper describe safeguards that have been put in place for the responsible 532 
+
+release of data or models that have a high risk for misuse (e.g., pre-trained language models, 533 
+
+image generators, or scraped datasets)? 534 
+
+Answer: [NA] 535 
+
+Justification: This doesn’t comes under the category of safeguards or anything related to 536 
+
+scraped datasets. 537 
+
+14 Guidelines: 538 
+
+• The answer NA means that the paper poses no such risks. 539 
+
+• Released models that have a high risk for misuse or dual-use should be released with 540 
+
+necessary safeguards to allow for controlled use of the model, for example by requiring 541 
+
+that users adhere to usage guidelines or restrictions to access the model or implementing 542 
+
+safety filters. 543 
+
+• Datasets that have been scraped from the Internet could pose safety risks. The authors 544 
+
+should describe how they avoided releasing unsafe images. 545 
+
+• We recognize that providing effective safeguards is challenging, and many papers do 546 
+
+not require this, but we encourage authors to take this into account and make a best 547 
+
+faith effort. 548 
+
+12. Licenses for existing assets 549 
+
+Question: Are the creators or original owners of assets (e.g., code, data, models), used in 550 
+
+the paper, properly credited and are the license and terms of use explicitly mentioned and 551 
+
+properly respected? 552 
+
+Answer: [NA] 553 
+
+Justification: We are the sole owner of code and models, we mentioned credit wherever we 554 
+
+used opensource models, or data. 555 
+
+Guidelines: 556 
+
+• The answer NA means that the paper does not use existing assets. 557 
+
+• The authors should cite the original paper that produced the code package or dataset. 558 
+
+• The authors should state which version of the asset is used and, if possible, include a 559 
+
+URL. 560 
+
+• The name of the license (e.g., CC-BY 4.0) should be included for each asset. 561 
+
+• For scraped data from a particular source (e.g., website), the copyright and terms of 562 
+
+service of that source should be provided. 563 
+
+• If assets are released, the license, copyright information, and terms of use in the 564 
+
+package should be provided. For popular datasets, paperswithcode.com/datasets 565 
+
+has curated licenses for some datasets. Their licensing guide can help determine the 566 
+
+license of a dataset. 567 
+
+• For existing datasets that are re-packaged, both the original license and the license of 568 
+
+the derived asset (if it has changed) should be provided. 569 
+
+• If this information is not available online, the authors are encouraged to reach out to 570 
+
+the asset’s creators. 571 
+
+13. New assets 572 
+
+Question: Are new assets introduced in the paper well documented and is the documentation 573 
+
+provided alongside the assets? 574 
+
+Answer: [Yes] 575 
+
+Justification: We did have detailed documentation of the models and code we tried. 576 
+
+Guidelines: 577 
+
+• The answer NA means that the paper does not release new assets. 578 
+
+• Researchers should communicate the details of the dataset/code/model as part of their 579 
+
+submissions via structured templates. This includes details about training, license, 580 
+
+limitations, etc. 581 
+
+• The paper should discuss whether and how consent was obtained from people whose 582 
+
+asset is used. 583 
+
+• At submission time, remember to anonymize your assets (if applicable). You can either 584 
+
+create an anonymized URL or include an anonymized zip file. 585 
+
+14. Crowdsourcing and research with human subjects. 586 
+
+Question: For crowdsourcing experiments and research with human subjects, does the paper 587 
+
+include the full text of instructions given to participants and screenshots, if applicable, as 588 
+
+well as details about compensation (if any)? 589 
+
+15 Answer: [NA] 590 
+
+Justification: We didn’t require any crowdsourcing, we used opensource data and required 591 
+
+very less efforts for training. 592 
+
+Guidelines: 593 
+
+• The answer NA means that the paper does not involve crowdsourcing nor research with 594 
+
+human subjects. 595 
+
+• Including this information in the supplemental material is fine, but if the main contribu-596 
+
+tion of the paper involves human subjects, then as much detail as possible should be 597 
+
+included in the main paper. 598 
+
+• According to the NeurIPS Code of Ethics, workers involved in data collection, curation, 599 
+
+or other labor should be paid at least the minimum wage in the country of the data 600 
+
+collector. 601 
+
+15. Institutional review board (IRB) approvals or equivalent for research with human 602 
+
+subjects 603 
+
+Question: Does the paper describe potential risks incurred by study participants, whether 604 
+
+such risks were disclosed to the subjects, and whether Institutional Review Board (IRB) 605 
+
+approvals (or an equivalent approval/review based on the requirements of your country or 606 
+
+institution) were obtained? 607 
+
+Answer: [NA] 608 
+
+Justification: Our work is independent work, not related to any organization. 609 
+
+Guidelines: 610 
+
+• The answer NA means that the paper does not involve crowdsourcing nor research with 611 
+
+human subjects. 612 
+
+• Depending on the country in which research is conducted, IRB approval (or equivalent) 613 
+
+may be required for any human subjects research. If you obtained IRB approval, you 614 
+
+should clearly state this in the paper. 615 
+
+• We recognize that the procedures for this may vary significantly between institutions 616 
+
+and locations, and we expect authors to adhere to the NeurIPS Code of Ethics and the 617 
+
+guidelines for their institution. 618 
+
+• For initial submissions, do not include any information that would break anonymity (if 619 
+
+applicable), such as the institution conducting the review. 620 
+
+16. Declaration of LLM usage 621 
+
+Question: Does the paper describe the usage of LLMs if it is an important, original, or 622 
+
+non-standard component of the core methods in this research? Note that if the LLM is used 623 
+
+only for writing, editing, or formatting purposes and does not impact the core methodology, 624 
+
+scientific rigorousness, or originality of the research, declaration is not required. 625 
+
+Answer: [Yes] 626 
+
+Justification: We used it for language and clarifying the formulation. 627 
+
+Guidelines: 628 
+
+• The answer NA means that the core method development in this research does not 629 
+
+involve LLMs as any important, original, or non-standard components. 630 
+
+• Please refer to our LLM policy ( https://neurips.cc/Conferences/2025/LLM )631 
+
+for what should or should not be described. 632 
+
+16 633 
+
+## References 634 
+
+Takuya Akiba, Makoto Shing, Yujin Tang, Qi Sun, and David Ha. Evolutionary optimization of model merging 635 
+
+recipes. Nature Machine Intelligence , pages 1–10, 2025. 636 
+
+Bryan Bo Cao, Abhinav Sharma, Lawrence O’Gorman, Michael Coss, and Shubham Jain. A lightweight measure 637 
+
+of classification difficulty from application dataset characteristics. In International Conference on Pattern 638 
+
+Recognition , pages 439–455. Springer, 2024a. 639 
+
+Bryan Bo Cao, Abhinav Sharma, Manavjeet Singh, Anshul Gandhi, Samir Das, and Shubham Jain. Representa-640 
+
+tion similarity: A better guidance of dnn layer sharing for edge computing without training. In Proceedings of 641 
+
+the 30th Annual International Conference on Mobile Computing and Networking , pages 2242–2244, 2024b. 642 
+
+Bryan Bo Cao, Lawrence O’Gorman, Michael Coss, and Shubham Jain. Few-class arena: A benchmark for 643 
+
+efficient selection of vision models and dataset difficulty measurement. In Proceedings of the International 644 
+
+Conference on Learning Representations (ICLR) , 2025. URL https://openreview.net/forum?id= 645 
+
+2ET561DyPe .646 
+
+Nicolas Carion, Francisco Massa, Gabriel Synnaeve, Nicolas Usunier, Alexander Kirillov, and Sergey Zagoruyko. 647 
+
+End-to-end object detection with transformers. In European conference on computer vision (ECCV) , pages 648 
+
+213–229. Springer, 2020a. 649 
+
+Nicolas Carion, Francisco Massa, Gabriel Synnaeve, Nicolas Usunier, Alexander Kirillov, and Sergey Zagoruyko. 650 
+
+End-to-end object detection with transformers. In European conference on computer vision , pages 213–229. 651 
+
+Springer, 2020b. 652 
+
+Gong Cheng, Junwei Han, and Lei Guo. Remote sensing image scene classification: Benchmark and state of the 653 
+
+art. ISPRS Journal of Photogrammetry and Remote Sensing , 124:157–173, 2017. 654 
+
+Mihai Cimpoi, Subhransu Maji, Iasonas Kokkinos, Scott Mohamed, and Andrea Vedaldi. Describing textures 655 
+
+in the wild. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition , pages 656 
+
+861–868, 2014. 657 
+
+Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, 658 
+
+Mostafa Dehghani, Matthias Minderer, Georg Georgiou, et al. An image is worth 16x16 words: Transformers 659 
+
+for image recognition at scale. 2021a. 660 
+
+Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, 661 
+
+Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, Jakob Uszkoreit, and Neil Houlsby. An 662 
+
+image is worth 16x16 words: Transformers for image recognition at scale. In International Conference on 663 
+
+Learning Representations , 2021b. 664 
+
+Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-Farley, Sherjil Ozair, Aaron 665 
+
+Courville, and Yoshua Bengio. Generative adversarial nets. In Advances in neural information processing 666 
+
+systems 27 (NIPS 2014) , pages 2672–2680, 2014. 667 
+
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In 668 
+
+Proceedings of the IEEE conference on computer vision and pattern recognition , pages 770–778, 2016. 669 
+
+Patrick Helber, Benjamin Bischke, Andreas Dengel, and Damian Borth. Introducing eurosat: A novel dataset 670 
+
+for sentinel-2 image classification. In 2019 IEEE International Geoscience and Remote Sensing Symposium 671 
+
+IGARSS 2019 , pages 204–207. IEEE, 2019. 672 
+
+Jonathan Ho, Ajay Jain, and Pieter Abbeel. Denoising diffusion probabilistic models. In Advances in Neural 673 
+
+Information Processing Systems 33 (NeurIPS 2020) , pages 6840–6851, 2020. 674 
+
+Gabriel Ilharco, Marco Tulio Ribeiro, Mitchell Wortsman, Ludwig Schmidt, Hannaneh Hajishirzi, and Ali 675 
+
+Farhadi. Editing models with task arithmetic. In The Eleventh International Conference on Learning 676 
+
+Representations , 2023. 677 
+
+Pavel Izmailov, Dmitrii Podoprikhin, Timur Garipov, Dmitry Vetrov, and Andrew Gordon Wilson. Averaging 678 
+
+weights leads to wider optima and better generalization. arXiv preprint arXiv:1803.05407 , 2018. UAI 2018. 679 
+
+Xisen Jin, Xiang Ren, Daniel Preotiuc-Pietro, and Pengxiang Cheng. Dataless knowledge fusion by merging 680 
+
+weights of language models. In The Eleventh International Conference on Learning Representations , 2023. 681 
+
+17 Simran Khanuja, Melvin Johnson, and Partha Talukdar. Mergedistill: Merging pre-trained language models 682 
+
+using distillation. arXiv preprint arXiv:2106.02834 , 2021. 683 
+
+Jonathan Krause, Benjamin Dunn, and Li Fei-Fei. Collecting and annotating a dataset for fine grained recognition 684 
+
+problems. In 2013 IEEE International Conference on Computer Vision Workshops , pages 139–146. IEEE, 685 
+
+2013. 686 
+
+Alex Krizhevsky and Geoffrey Hinton. Learning multiple layers of features from tiny images. Technical report, 687 
+
+University of Toronto, Canada, 2009. 688 
+
+Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton. Imagenet classification with deep convolutional neural 689 
+
+networks. In Advances in neural information processing systems , volume 25, pages 1097–1105, 2012. 690 
+
+Solomon Kullback and Richard A Leibler. On information and sufficiency. The Annals of Mathematical 691 
+
+Statistics , 22(1):79–86, 1951. 692 
+
+Yann LeCun, Léon Bottou, Yoshua Bengio, and Patrick Haffner. Gradient-based learning applied to document 693 
+
+recognition. Proceedings of the IEEE , 86(11):2278–2324, 1998. 694 
+
+Zhuang Liu, Hanzi Mao, Chao-Yuan Wu, Christoph Feichtenhofer, Trevor Darrell, and Saining Xie. A convnet 695 
+
+for the 2020s. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition 696 
+
+(CVPR) , pages 11976–11986, 2022. 697 
+
+Jonathan Long, Evan Shelhamer, and Trevor Darrell. Fully convolutional networks for semantic segmentation. 698 
+
+In Proceedings of the IEEE conference on computer vision and pattern recognition (CVPR) , pages 3431–3440, 699 
+
+2015. 700 
+
+Anqi Mao, Mehryar Mohri, and Yutao Zhong. Cross-entropy loss functions: Theoretical analysis and applications. 701 
+
+In International conference on Machine learning , pages 23803–23828. PMLR, 2023. 702 
+
+Michael S Matena and Colin A Raffel. Merging models with fisher-weighted averaging. Advances in Neural 703 
+
+Information Processing Systems , 35:17703–17716, 2022. 704 
+
+Mehdi Mirza and Simon Osindero. Conditional generative adversarial nets. 2014. 705 
+
+Yuval Netzer, Tao Wang, Adam Coates, Alessandro Bissacco, Bo Wu, and Andrew Y Ng. Reading digits in 706 
+
+natural images with convolutional neural networks. Technical report, Google, 2011. 707 
+
+Arthi Padmanabhan, Neil Agarwal, Anand Iyer, Ganesh Ananthanarayanan, Yuanchao Shu, Nikolaos Karianakis, 708 
+
+Guoqing Harry Xu, and Ravi Netravali. Gemel: Model merging for {Memory-Efficient },{Real-Time } video 709 
+
+analytics at the edge. In 20th USENIX Symposium on Networked Systems Design and Implementation (NSDI 710 
+
+23) , pages 973–994, 2023. 711 
+
+Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry, 712 
+
+Amanda Askell, Pamela Mishkin, Jack Clark, Gretchen Krueger, and Ilya Sutskever. Learning transferable 713 
+
+visual models from natural language supervision. In Proceedings of the 38th International Conference on 714 
+
+Machine Learning (ICML) , volume 139 of Proceedings of Machine Learning Research , pages 8748–8763. 715 
+
+PMLR, 2021. 716 
+
+Shaoqing Ren, Kaiming He, Ross Girshick, and Jian Sun. Faster r-cnn: Towards real-time object detection with 717 
+
+region proposal networks. In Advances in neural information processing systems 28 (NIPS 2015) , pages 718 
+
+91–99, 2015. 719 
+
+Robin Rombach, Andreas Blattmann, Dominik Lorenz, Patrick Esser, and Björn Ommer. High-resolution image 720 
+
+synthesis with latent diffusion models. In Proceedings of the IEEE/CVF Conference on Computer Vision and 721 
+
+Pattern Recognition (CVPR) , pages 10684–10695, 2022. 722 
+
+Chitwan Saharia, Jonathan Ho, William Chan, Tim Salimans, David J Fleet, and Mohammad Norouzi. Image 723 
+
+super-resolution via iterative refinement. In IEEE Transactions on Pattern Analysis and Machine Intelligence ,724 
+
+2022. 725 
+
+Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale image recognition. 726 
+
+arXiv preprint arXiv:1409.1556 , 2014. 727 
+
+Manavjeet Singh, Sri Pramodh Rachuri, Bryan Bo Cao, Abhinav Sharma, Venkata Bhumireddy, Francesco 728 
+
+Bronzino, Samir R Das, Anshul Gandhi, and Shubham Jain. Ovida: Orchestrator for video analytics on 729 
+
+disaggregated architecture. In 2024 IEEE/ACM Symposium on Edge Computing (SEC) , pages 135–148. IEEE, 730 
+
+2024. 731 
+
+18 Johannes Stallkamp, Reda Mammeri, Mark Eckenfelder, Jonathan Richter, Didier Van Cauwelaert, Ulrich 732 
+
+Schaefer, and Christian Igel. The german traffic sign recognition benchmark. In The 2011 international joint 733 
+
+conference on neural networks , pages 1453–1460. IEEE, 2011. 734 
+
+Anke Tang, Enneng Yang, Li Shen, Yong Luo, Han Hu, Bo Du, and Dacheng Tao. Merging models on 735 
+
+the fly without retraining: A sequential approach to scalable continual model merging. arXiv preprint 736 
+
+arXiv:2501.09522 , 2025. 737 
+
+Hugo Touvron, Matthieu Cord, Matthijs Douze, Francisco Massa, Hervé Jégou, and Alexandre Sablayrolles. 738 
+
+Training data-efficient image transformers & distillation through attention. In International Conference on 739 
+
+Machine Learning (ICML) , pages 10347–10357. PMLR, 2021. 740 
+
+Simon Vandenhende, Stamatios Georgoulis, Leander Arras, Luc Van Gool, and Radu Timofte. Multi-task 741 
+
+learning for computer vision: Recent advances and future directions. IEEE Transactions on Pattern Analysis 742 
+
+and Machine Intelligence , 44(10):6488–6513, 2022a. 743 
+
+Simon Vandenhende, Stamatios Georgoulis, Wouter Van Gansbeke, Marc Proesmans, Dengxin Dai, and Luc 744 
+
+Van Gool. Multi-task learning for dense prediction tasks: A survey. IEEE Transactions on Pattern Analysis 745 
+
+and Machine Intelligence , 44(7):3614–3633, 2022b. 746 
+
+Mitchell Wortsman, Gabriel Ilharco, Samir Yitzhak Gadre, Rebecca Roelofs, Raphael Gontijo Lopes, Ari S. 747 
+
+Morcos, Hongseok Namkoong, Ali Farhadi, Yair Carmon, Simon Kornblith, and Ludwig Schmidt. Model 748 
+
+soups: averaging weights of multiple fine-tuned models improves accuracy without increasing inference 749 
+
+time. In Proceedings of the 39th International Conference on Machine Learning (ICML) , volume 162 of 750 
+
+Proceedings of Machine Learning Research , pages 23965–23998. PMLR, 2022. 751 
+
+Jianxiong Xiao, James Hays, Kevin A Ehinger, Aude Oliva, and Antonio Torralba. Sun attribute dataset: 752 
+
+Learning the joint distribution of object and attribute. In Proceedings of the IEEE Conference on Computer 753 
+
+Vision and Pattern Recognition , pages 4145–4153, 2016. 754 
+
+Enze Xie, Wenhai Wang, Zhiding Yu, Anima Anandkumar, Jose M Alvarez, and Ping Luo. Segformer: Simple 755 
+
+and efficient design for semantic segmentation with transformers. In Advances in Neural Information 756 
+
+Processing Systems 34 (NeurIPS 2021) , pages 12077–12090, 2021. 757 
+
+Prateek Yadav, Derek Tam, Leshem Choshen, Colin A Raffel, and Mohit Bansal. Ties-merging: Resolving 758 
+
+interference when merging models. Advances in Neural Information Processing Systems , 36:7093–7115, 759 
+
+2023a. 760 
+
+Sachin Yadav, Chitta Malaviya, Graham Neubig, and Puneet Agarwal. Merging transformers without training 761 
+
+via a convex combination of parameter subsets. pages 41105–41125, 2023b. 762 
+
+Enneng Yang, Zhenyi Wang, Li Shen, Shiwei Liu, Guibing Guo, Xingwei Wang, and Dacheng Tao. Adamerging: 763 
+
+Adaptive model merging for multi-task learning. In The Twelfth International Conference on Learning 764 
+
+Representations .765 
+
+Peng Ye, Chenyu Huang, Mingzhu Shen, Tao Chen, Yongqi Huang, Yuning Zhang, and Wanli Ouyang. Merging 766 
+
+vision transformers from different tasks and domains. arXiv preprint arXiv:2312.16240 , 2023. 767 
+
+Kai Zhang, Wangmeng Zuo, Yunjin Chen, Deyu Meng, and Lei Zhang. Beyond a gaussian denoiser: Residual 768 
+
+learning of deep cnn for image denoising. In IEEE transactions on image processing , volume 26, pages 769 
+
+3142–3155. IEEE, 2017. 770 
+
+Yu Zhang and Qiang Yang. A survey on multi-task learning. IEEE Transactions on Knowledge and Data 771 
+
+Engineering , 34(12):5586–5609, 2021. 772 
+
+19
