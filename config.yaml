@@ -25,3 +25,57 @@ subscriptions:
     stage: A
     diff_threshold_pct: 15
   keyword_recall_mode: or
+  intent_profiles:
+    - tag: edge-llm
+      description: 帮我查找关于大模型端侧部署、边缘部署的论文
+      enabled: true
+      paper_sources:
+        - arxiv
+      keywords:
+        - keyword: large language model deployment
+          keyword_cn: 大语言模型部署
+          query: deploying large language models on resource-constrained devices
+        - keyword: edge inference
+          keyword_cn: 边缘推理
+          query: running neural network inference on edge devices
+        - keyword: quantization
+          keyword_cn: 量化
+          query: reducing numerical precision to accelerate inference on edge hardware
+        - keyword: knowledge distillation
+          keyword_cn: 知识蒸馏
+          query: transferring knowledge from a large teacher model to a smaller student model
+        - keyword: hardware acceleration
+          keyword_cn: 硬件加速
+          query: using specialized hardware like GPUs and NPUs for faster inference
+      intent_queries:
+        - query: efficient deployment strategies for large language models on edge devices
+          query_cn: 在边缘设备上高效部署大语言模型的策略
+          enabled: true
+          source: manual
+          note: ''
+        - query: techniques to compress and accelerate neural networks for on device inference
+          query_cn: 压缩和加速神经网络以实现端侧推理的技术
+          enabled: true
+          source: manual
+          note: ''
+        - query: running transformer models on resource constrained hardware with limited memory
+          query_cn: 在内存有限的资源受限硬件上运行transformer模型
+          enabled: true
+          source: manual
+          note: ''
+      updated_at: '2026-06-08T15:32:16.542Z'
+source_backends:
+  arxiv:
+    papers_table: arxiv_papers
+    use_vector_rpc: true
+    vector_rpc: match_arxiv_papers
+    vector_rpc_exact: match_arxiv_papers_exact
+    use_bm25_rpc: true
+    bm25_rpc: match_arxiv_papers_bm25
+    sync_table: arxiv_sync_status
+    sync_success_value: success
+    schema: public
+    kind: supabase
+    enabled: true
+    url: https://lyucdwgefyfbmaiopjbk.supabase.co
+    anon_key: sb_publishable_lX-oi64Uxyd7SIVv3_w2Uw_MTOojeKq
